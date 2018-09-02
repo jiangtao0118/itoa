@@ -1,0 +1,148 @@
+package com.wisdom.spark.streaming.tools
+
+import java.util.concurrent.{ExecutorService, Executors}
+
+import com.wisdom.spark.common.bean.{PredResult, RelationAnalysis}
+import com.wisdom.spark.common.util.ItoaPropertyUtil
+import com.wisdom.spark.ml.tgtVar.AllPredcictTarget
+import com.wisdom.spark.streaming.dao.{PredResultDao, RelationDao}
+import com.wisdom.spark.streaming.service.{AlarmService, PredResultService, SaveResultService}
+import com.wisdom.spark.streaming.thread.Thread4InitialModelObj
+import com.wisdom.spark.streaming.thread.Thread4InitialModelObj.ModelRecord
+import org.apache.log4j.Logger
+
+/**
+  * Created by zhengz on 2017/3/7.
+  *
+  * 创建一个公用线程池
+  */
+object ThreadPools {
+  //获取配置文件
+  val props = ItoaPropertyUtil.getProperties()
+  //线程池最大线程数
+  val maxThreadNums = props.getProperty("spark.driver.thread.max").toInt
+  //线程池变量
+  private var pools: ExecutorService = null
+
+  //创建线程池
+  def getPools(): ExecutorService = {
+    //检查线程池状态，如果状态为null Terminated Shutdown则新建线程池
+    if (pools == null || pools.isTerminated || pools.isShutdown) {
+      //创建线程池
+      pools = Executors.newFixedThreadPool(maxThreadNums)
+    }
+    //返回线程池对象
+    pools
+  }
+
+  def main(args: Array[String]) {
+
+  }
+}
+
+/**
+  * 创建一个类实现runnable接口，用于预测告警判断操作
+  */
+class Thread4CheckAlarm(p: PredResult) extends Runnable {
+  override def run(): Unit = {
+    val alarmService: AlarmService = new AlarmService
+    alarmService.checkIfAlarm(p)
+  }
+}
+
+
+/**
+  * 创建一个类实现runnable接口，用于预测告警判断操作
+  */
+class Thread4CheckAlarmPPNBatch(p: List[PredResult]) extends Runnable {
+  override def run(): Unit = {
+    val alarmService: AlarmService = new AlarmService
+    alarmService.checkIfAlarmBatch(p)
+  }
+}
+
+/**
+  * 创建一个类实现runnable接口，用于预测告警判断操作
+  */
+class Thread4CheckAlarmWINSTATSBatch(p: List[PredResult]) extends Runnable {
+  override def run(): Unit = {
+    val alarmService: AlarmService = new AlarmService
+    alarmService.checkIfAlarmBatch2(p)
+  }
+}
+
+/**
+  * 创建一个类实现runnable接口，用于预测告警判断操作
+  */
+class Thread4SavePPNResult(batchResult: List[PredResult]) extends Runnable {
+  override def run(): Unit = {
+    val predResultDao = new PredResultDao
+    predResultDao.saveBatchPredResult3(batchResult)
+  }
+}
+
+class Thread4SaveWINSTATSResult(batchResult: List[PredResult]) extends Runnable {
+  override def run(): Unit = {
+    val predResultDao = new PredResultDao
+    predResultDao.saveBatchResult(batchResult)
+  }
+}
+
+
+class Thread4SaveRelationResult(batchResult: List[RelationAnalysis]) extends Runnable {
+  override def run(): Unit = {
+    val relationDao = new RelationDao
+    relationDao.saveRelationAnalysisList2Mysql(batchResult)
+  }
+}
+
+/**
+  * 创建一个线程实例化并put进map
+  *
+  * @param modelObjKey     map中的指标信息key
+  * @param indexNamePeriod 指标名称_周期
+  * @param host            主机名
+  */
+class ModelInstantiationThread(modelObjKey: String, indexNamePeriod: String, host: String) extends Runnable {
+  val logger = Logger.getLogger(this.getClass)
+
+  override def run(): Unit = {
+
+    val time0 = System.currentTimeMillis()
+    var obj: AllPredcictTarget = new AllPredcictTarget(null, null)
+    try {
+      obj = new AllPredcictTarget(indexNamePeriod, host)
+    } catch {
+      case e => logger.error("** " + modelObjKey + " NEW_ERROR ** =>new AllPredcictTarget(" + indexNamePeriod + "," + host + ") :ExceptionMsg:" + e.getMessage + "\n" + e.printStackTrace())
+    }
+    Thread4InitialModelObj.tgtModelMap.put(modelObjKey, obj)
+    val time1 = System.currentTimeMillis()
+    logger.warn("******* " + modelObjKey + "\tAllPredcictTarget() COST ===> " + (time1 - time0) + " ms *******")
+  }
+}
+
+/**
+  * 创建一个线程实例化并put进map
+  *
+  * @param modelObjKey     map中的指标信息key
+  * @param indexNamePeriod 指标名称_周期
+  * @param host            主机名
+  */
+class ModelInstantiationThread2(modelObj: ModelRecord) extends Runnable {
+  val logger = Logger.getLogger(this.getClass)
+
+  override def run(): Unit = {
+
+    val modelObjKey=modelObj.tgtvar+"_"+modelObj.period+"_"+modelObj.hostnode
+    val time0 = System.currentTimeMillis()
+    var obj: AllPredcictTarget = new AllPredcictTarget(null)
+    try {
+      obj = new AllPredcictTarget(modelObj)
+    } catch {
+      case e => logger.error("** " + modelObjKey + " NEW_ERROR ** =>new AllPredcictTarget(" + modelObjKey + "," + ") :ExceptionMsg:" + e.getMessage + "\n" + e.printStackTrace())
+    }
+    Thread4InitialModelObj.tgtModelMap.put(modelObjKey, obj)
+    val time1 = System.currentTimeMillis()
+    logger.warn("******* " + modelObjKey + "\tAllPredcictTarget() COST ===> " + (time1 - time0) + " ms *******")
+  }
+}
