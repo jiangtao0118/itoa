@@ -1,0 +1,563 @@
+package com.wisdom.spark.streaming.service
+
+import java.sql.{Connection, PreparedStatement, ResultSet, Timestamp}
+import java.text.{DecimalFormat, SimpleDateFormat}
+
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.wisdom.spark.common.bean.PredResult
+import com.wisdom.spark.common.util.{ConnPoolUtil2, ItoaPropertyUtil}
+import com.wisdom.spark.ml.mlUtil.{ContextUtil, FileUtil}
+import com.wisdom.spark.ml.tgtVar.DB2diagOut
+import com.wisdom.spark.streaming.bean.{AlarmResult, AlarmRules}
+import com.wisdom.spark.streaming.dao.AlarmDao
+import com.wisdom.spark.streaming.gc.GcCLRes
+import com.wisdom.spark.streaming.tools.{DateUtil, FileUtils, JsonUtil, ParamUtil}
+import org.apache.log4j.Logger
+import org.apache.spark.sql.catalyst.expressions.Substring
+
+/**
+  * Created by wisdom on 2016/12/20.
+  * 告警业务逻辑判断过程，枚举出所有可能的告警按照告警级别进行判断，如果存在告警，及时将告警结果保存至数据库，或者将告警结果写入文件
+  */
+class AlarmService {
+  val props = ItoaPropertyUtil.getProperties()
+  val logger = Logger.getLogger(this.getClass)
+
+  val alarmDao = new AlarmDao
+
+//  val conn = ConnPoolUtil2.getConn()
+
+
+  /**
+    * 判断告警过程，针对 BD2diagOut 输出日志以及词频情况
+    *
+    * resultTyp,writeTime,hostName,alarmTime,alarmInfo
+    *
+    * @param dbLogList
+    */
+  def checkDB2LogIfAlarm(dbLogList: List[DB2diagOut]): Unit = {
+    val conn = ConnPoolUtil2.getConn()
+    //val conn = ConnPoolUtil2.getConn()
+    var listAR = List[AlarmResult]()
+    val sdt = new SimpleDateFormat("yyyy-MM-dd-hh.mm.ss")
+    if (dbLogList != null && dbLogList.size != 0) {
+      for (dbLog <- dbLogList) {
+        if (dbLog != null && dbLog.wordGroupIsLF) {
+          val db2Time = (sdt.parse(dbLog.db2Time.substring(0, 19)).getTime / 1000).toString
+          val ar: AlarmResult = new AlarmResult()
+          ar.setResultTyp("db2Exception") //告警类型，枚举如下：predict,db2Exception,gcException,indexExection
+          ar.setHostName(dbLog.hostnode)
+          ar.setAlarmTime(db2Time)
+          val wordLists = dbLog.wordGroupAndFreq
+          ar.setAlarmInfo("出现低频词," + wordLists)
+          ar.setIndexName("DB2")
+          var keyWords = ""
+          for (i <- 0 until wordLists.size()) {
+            //将低频词组进行拆分，取出关键字用空格连接保存
+            keyWords += wordLists.get(i)._1 + " "
+          }
+          ar.setPreCol1(keyWords)
+          ar.setPreCol2("0") //0-未处理 1-已处理 默认未处理
+          listAR = listAR :+ ar
+        }
+      }
+      logger.info("**** 开始批量保存告警结果... ===> " + listAR)
+      alarmDao.saveAlarmResultList(listAR, conn)
+    }
+    ConnPoolUtil2.releaseCon(conn)
+  }
+
+  /**
+    * 判断告警过程，针对 GC日志 输出日志
+    *
+    * resultTyp,writeTime,hostName,alarmTime,alarmInfo
+    *
+    * @param gcLogList
+    */
+  def checkGClogIfAlarm(gcLogList: List[GcCLRes]): Unit = {
+    val conn = ConnPoolUtil2.getConn()
+    var listAR = List[AlarmResult]()
+    if (gcLogList != null && gcLogList.size != 0) {
+      for (gcLog <- gcLogList) {
+        if (gcLog != null && gcLog.abnormal) {
+          val ar: AlarmResult = new AlarmResult()
+          ar.setResultTyp("gcException") //告警类型，枚举如下：predict,db2Exception,gcException,indexExection
+          ar.setHostName(gcLog.hostname)
+          ar.setAlarmTime(gcLog.exclusiveStart_timestamp)
+          ar.setAlarmInfo("偏离正常模式,{" + "持续时间:" + gcLog.gcEnd_durationms + ",GC开始内存使用率:" + gcLog.gcStart_mem_percent + ",GC结束内存使用率:" + gcLog.gcEnd_mem_percent + "}")
+          ar.setIndexName("GC")
+          ar.setPreCol1(gcLog.unique_gcInfo)
+          ar.setPreCol2("0") //0-未处理 1-已处理 默认未处理
+          listAR = listAR :+ ar
+        }
+      }
+      logger.info("**** 开始批量保存告警结果... ===> " + listAR)
+      alarmDao.saveAlarmResultList(listAR, conn)
+    }
+    ConnPoolUtil2.releaseCon(conn)
+  }
+
+  /**
+    * 判断指标是否发生异常告警，指标值存在严重偏离情况(no use)
+    *
+    * @param indexList
+    */
+  def checkIndexIfAlarm(indexList: List[PredResult]): Unit = {
+    val conn = ConnPoolUtil2.getConn()
+    var listAR = List[AlarmResult]()
+    if (indexList != null && indexList.size != 0) {
+      for (pred <- indexList) {
+        if (pred != null) {
+          val ar: AlarmResult = new AlarmResult()
+          ar.setResultTyp("indexExection") //告警类型，枚举如下：predict,db2Exception,gcException,indexExection
+          ar.setHostName(pred.getHostName)
+          ar.setAlarmTime(pred.getCurrentDataTime)
+          ar.setAlarmInfo("偏离正常模式,{指标名称:" + pred.getPredIndexName + ",指标值:" + pred.getNextPredValue + "}")
+          ar.setPreCol2("0") //0-未处理 1-已处理 默认未处理
+          listAR = listAR :+ ar
+        }
+      }
+      logger.info("**** 开始批量保存告警结果... ===> " + listAR)
+      alarmDao.saveAlarmResultList(listAR, conn)
+    }
+    ConnPoolUtil2.releaseCon(conn)
+  }
+
+
+  /**
+    * 判断告警过程,如果需要告警，则保存至数据库或写文件到相关目录 针对指标预测告警
+    *
+    * resultTyp,writeTime,hostName,alarmTime,alarmInfo,indexName,predPeriod,confId,ruleId
+    *
+    * @param predResult 对象模式的预测信息，用来判断告警情况
+    *
+    *                   根据ruleId执行对应的判断方法
+    */
+  def checkIfAlarm(predResult: PredResult): Unit = {
+    val conn = ConnPoolUtil2.getConn()
+    //查找预测结果对应的告警规则
+    val list = alarmDao.findIndexAlarmConf(predResult, conn)
+    //t1.confId, t1.sysName, t1.hostName, t1.indexTyp, t1.predIndexName, t1.confDesc, t1.confLowValue, t1.confMidValue, t1.confHighValue, t2.ruleId, t2.confId, t3.ruleName, t3.rule, t3.alarmLevel
+    //用于保存发生了告警的结果的List
+    var listAR = List[AlarmResult]()
+    //用以封装发生了告警的实例
+    var ar: AlarmResult = null
+    logger.info("**** 逻辑判断，预测结果是否发生告警 ****")
+    //判断是否发生了告警的循环条件
+    var isAlarmed = true
+    //遍历预测结果对应的告警规则，判断是否告警，如果告警则将结果放入listAR中
+    for (map <- list if isAlarmed) {
+      if (map.contains("ruleId")) {
+        //提取规则当中的ruleId，进行判断
+        val i = map("ruleId") //优先级（3，7，6，2，8，5，1，4）
+        //判断预测结果是否满足ruleId=3的告警
+        if ("3".equals(i)) {
+          //如果发生告警，则不继续循环判断，采用状态字返回isAlarmed = true
+          ar = ruleFunc3(predResult, map)
+          isAlarmed = false
+        } else if ("7".equals(i)) {
+//          ar = ruleFunc7(predResult, map)
+          isAlarmed = false
+        } else if ("6".equals(i)) {
+          ar = ruleFunc6(predResult, map)
+          isAlarmed = false
+        }
+
+        /** 暂时至告警前三项，其他告警为提高效率屏蔽 */
+        /** else if ("2".equals(i)) {
+          * ar = ruleFunc2(predResult, map)
+          * } else if ("8".equals(i)) {
+          * ar = ruleFunc8(predResult, map)
+          * } else if ("5".equals(i)) {
+          * ar = ruleFunc5(predResult, map)
+          * } else if ("1".equals(i)) {
+          * ar = ruleFunc1(predResult, map)
+          * } else if ("4".equals(i)) {
+          * ar = ruleFunc4(predResult, map)
+          * } */
+      }
+      if (ar != null) {
+        ar.setResultTyp("predict") //告警类型，枚举如下：predict,db2Exception,gcException,indexExection
+        ar.setHostName(predResult.getHostName)
+        ar.setAlarmTime(predResult.getCurrentDataTime)
+        ar.setIndexName(predResult.getPredIndexName)
+        ar.setPredPeriod(predResult.getPredPeriod)
+        ar.setConfId(map("confId").toInt)
+        ar.setRuleId(map("ruleId").toInt)
+        ar.setPreCol2("0") //0-未处理 1-已处理 默认未处理
+        listAR = listAR :+ ar
+      }
+    }
+    logger.warn("**** 将告警结果，批量保存至告警结果表 告警记录数===> " + listAR.size)
+    alarmDao.saveAlarmResultList(listAR, conn)
+    ConnPoolUtil2.releaseCon(conn)
+
+  }
+
+
+  /**
+    * 判断告警过程,如果需要告警，则保存至数据库或写文件到相关目录 针对指标预测告警
+    *
+    * resultTyp,writeTime,hostName,alarmTime,alarmInfo,indexName,predPeriod,confId,ruleId
+    *
+    * @param predResult 对象模式的预测信息，用来判断告警情况
+    *
+    *                   根据ruleId执行对应的判断方法
+    */
+  def checkIfAlarmBatch(predResultList: List[PredResult]): Unit = {
+    val conn = ConnPoolUtil2.getConn()
+    //用于保存发生了告警的结果的List
+    var listAR = List[AlarmResult]()
+    for (predResult <- predResultList) {
+      //查找预测结果对应的告警规则
+      val list = alarmDao.findIndexAlarmConf(predResult, conn)
+      //t1.confId, t1.sysName, t1.hostName, t1.indexTyp, t1.predIndexName, t1.confDesc, t1.confLowValue, t1.confMidValue, t1.confHighValue, t2.ruleId, t2.confId, t3.ruleName, t3.rule, t3.alarmLevel
+      //用以封装发生了告警的实例
+      var ar: AlarmResult = null
+      logger.info("**** 逻辑判断，预测结果是否发生告警 ****")
+      //判断是否发生了告警的循环条件
+      var isAlarmed = true
+      //遍历预测结果对应的告警规则，判断是否告警，如果告警则将结果放入listAR中
+      for (map <- list if isAlarmed) {
+        if (map.contains("ruleId")) {
+          //提取规则当中的ruleId，进行判断
+          val i = map("ruleId") //优先级（3，7，6，2，8，5，1，4）
+          //判断预测结果是否满足ruleId=3的告警
+          if ("3".equals(i)) {
+            //如果发生告警，则不继续循环判断，采用状态字返回isAlarmed = true
+            ar = ruleFunc3(predResult, map)
+            isAlarmed = false
+          } else if ("7".equals(i)) {
+//            ar = ruleFunc7(predResult, map)
+            isAlarmed = false
+          } else if ("6".equals(i)) {
+            ar = ruleFunc6(predResult, map)
+            isAlarmed = false
+          }
+
+          /** 暂时至告警前三项，其他告警为提高效率屏蔽 */
+          /** else if ("2".equals(i)) {
+            * ar = ruleFunc2(predResult, map)
+            * } else if ("8".equals(i)) {
+            * ar = ruleFunc8(predResult, map)
+            * } else if ("5".equals(i)) {
+            * ar = ruleFunc5(predResult, map)
+            * } else if ("1".equals(i)) {
+            * ar = ruleFunc1(predResult, map)
+            * } else if ("4".equals(i)) {
+            * ar = ruleFunc4(predResult, map)
+            * } */
+        }
+        if (ar != null) {
+          ar.setResultTyp("predict") //告警类型，枚举如下：predict,db2Exception,gcException,indexExection
+          ar.setHostName(predResult.getHostName)
+          ar.setAlarmTime(predResult.getCurrentDataTime)
+          ar.setIndexName(predResult.getPredIndexName)
+          ar.setPredPeriod(predResult.getPredPeriod)
+          ar.setConfId(map("confId").toInt)
+          ar.setRuleId(map("ruleId").toInt)
+          ar.setPreCol2("0") //0-未处理 1-已处理 默认未处理
+          listAR = listAR :+ ar
+        }
+      }
+    }
+    logger.warn("**** 将告警结果，批量保存至告警结果表 告警记录数===> " + listAR.size)
+    alarmDao.saveAlarmResultList(listAR, conn)
+    ConnPoolUtil2.releaseCon(conn)
+
+  }
+
+  /**
+    * 判断告警过程,如果需要告警，则保存至数据库或写文件到相关目录 针对指标预测告警
+    *
+    * resultTyp,writeTime,hostName,alarmTime,alarmInfo,indexName,predPeriod,confId,ruleId
+    *
+    * @param predResult 对象模式的预测信息，用来判断告警情况
+    *
+    *                   根据ruleId执行对应的判断方法
+    */
+  def checkIfAlarmBatch2(predResultList: List[PredResult]): Unit = {
+    val conn = ConnPoolUtil2.getConn()
+    //用于保存发生了告警的结果的List
+    var listAR = List[AlarmResult]()
+    for (predResult <- predResultList) {
+      val actualValue = predResult.getCurrentActualValue
+      val avgValue = predResult.getNextPredMaxValue
+      try{
+        if (actualValue!="" && avgValue!=""  && actualValue.toDouble > avgValue.toDouble) {
+          var exceedPercent=0
+          if(avgValue.toDouble!=0.00){
+            val exceed=(actualValue.toDouble - avgValue.toDouble) / avgValue.toDouble
+
+            exceedPercent=exceed.toInt*100
+          }else{
+            exceedPercent=actualValue.toDouble.toInt*100
+          }
+
+          val tolerance=props.getProperty("alarm.result.tolerance").toInt
+          if(exceedPercent>tolerance){
+            val arOnce = new AlarmResult(predResult.getPredIndexName +"监测指标发生告警，指标实测值大于历史5分钟阈值,超出"+ exceedPercent +"%!!!")
+            arOnce.setResultTyp("predict") //告警类型，枚举如下：predict,db2Exception,gcException,indexExection
+            arOnce.setHostName(predResult.getHostName)
+            arOnce.setAlarmTime(predResult.getCurrentDataTime)
+            arOnce.setIndexName(predResult.getPredIndexName)
+            arOnce.setPredPeriod(predResult.getPredPeriod)
+            arOnce.setPreCol1("0")
+            arOnce.setPreCol2("0") //0-未处理 1-已处理 默认未处理
+            listAR = listAR.::(arOnce)
+          }
+        }
+
+        if("00".equalsIgnoreCase(predResult.getPredPeriod)){
+          val arTriple:AlarmResult=ruleFunc9(predResult,conn)
+          if(arTriple!=null){
+            arTriple.setResultTyp("predict") //告警类型，枚举如下：predict,db2Exception,gcException,indexExection
+            arTriple.setHostName(predResult.getHostName)
+            arTriple.setAlarmTime(predResult.getCurrentDataTime)
+            arTriple.setIndexName(predResult.getPredIndexName)
+            arTriple.setPredPeriod(predResult.getPredPeriod)
+            arTriple.setPreCol1("0")
+            arTriple.setPreCol2("0") //0-未处理 1-已处理 默认未处理
+            listAR = listAR.::(arTriple)
+          }
+        }
+      }catch {
+        case e:Exception=>logger.error("checkIfAlarmBatch2 Error===> " + e.printStackTrace())
+      }
+    }
+    logger.warn("**** 将告警结果，批量保存至告警结果表 告警记录数===> " + listAR.size)
+    alarmDao.saveAlarmResultList(listAR, conn)
+    ConnPoolUtil2.releaseCon(conn)
+  }
+
+
+  /**
+    * 对应规则ID=1的判断逻辑
+    * 规则1，预测值 指标阈值低位 3级告警
+    *
+    * @param res
+    * @return
+    */
+  def ruleFunc1(res: PredResult, map: Map[String, String]): AlarmResult = {
+    if (map.contains("confLowValue")) {
+      //预测值 大于 配置低位值
+      if (map("confLowValue") < res.getNextPredValue) {
+        return new AlarmResult("预测指标发生告警，预测值超过阈值低位!!")
+      }
+    }
+    null
+  }
+
+  /**
+    * 对应规则ID=2的判断逻辑
+    * 规则2，预测值 指标阈值中位 2级告警
+    *
+    * @param res
+    * @return
+    */
+  def ruleFunc2(res: PredResult, map: Map[String, String]): AlarmResult = {
+    if (map.contains("confMidValue")) {
+      //预测值 大于 配置中位值
+      if (map("confMidValue") < res.getNextPredValue) {
+        return new AlarmResult("预测指标发生告警，预测值超过阈值中位!!")
+      }
+    }
+    null
+  }
+
+  /**
+    * 对应规则ID=3的判断逻辑
+    * 规则3，预测值 指标阈值高位 1级告警
+    *
+    * @param res
+    * @return
+    */
+  def ruleFunc3(res: PredResult, map: Map[String, String]): AlarmResult = {
+    if (map.contains("confHighValue")) {
+      //预测值 大于 配置高位值
+      if (map("confHighValue") < res.getNextPredValue) {
+        return new AlarmResult(appendAlarmInfo(res, map))
+      }
+    }
+    null
+  }
+
+  /**
+    * 对应规则ID=4的判断逻辑
+    * 规则4，预测上限值 指标阈值低位 3级告警
+    *
+    * @param res
+    * @return
+    */
+  def ruleFunc4(res: PredResult, map: Map[String, String]): AlarmResult = {
+    if (map.contains("confLowValue")) {
+      //预测上限值 大于 配置低位值
+      if (map("confLowValue") < res.getNextPredMaxValue) {
+        return new AlarmResult("预测指标发生告警，预测上限值超过阈值低位!!")
+      }
+    }
+    null
+  }
+
+  /**
+    * 对应规则ID=5的判断逻辑
+    * 规则5，预测上限值 指标阈值中位 2级告警
+    *
+    * @param res
+    * @return
+    */
+  def ruleFunc5(res: PredResult, map: Map[String, String]): AlarmResult = {
+    if (map.contains("confMidValue")) {
+      //预测上限值 大于 配置中位
+      if (map("confMidValue") < res.getNextPredMaxValue) {
+        return new AlarmResult("预测指标发生告警，预测上限值超过阈值中位!!")
+      }
+    }
+    null
+  }
+
+  /**
+    * 对应规则ID=6的判断逻辑
+    * 规则6，预测上限值 指标阈值高位 1级告警
+    *
+    * @param res
+    * @return
+    */
+  def ruleFunc6(res: PredResult, map: Map[String, String]): AlarmResult = {
+    if (map.contains("confHighValue")) {
+      //预测上限值 大于 配置高位
+      if (map("confHighValue") < res.getNextPredMaxValue) {
+        return new AlarmResult(appendAlarmInfo(res, map))
+      }
+    }
+    null
+  }
+
+  /**
+    * 对应规则ID=7的判断逻辑
+    * 规则7，指标实测值 持续5周期上升 1级告警
+    *
+    * @param res
+    * @return
+    */
+//  def ruleFunc7(res: PredResult, map: Map[String, String]): AlarmResult = {
+//    val lv = alarmDao.findLatelyPredResult(res, conn)
+//    if (lv != null && lv.size >= 5) {
+//      if (res.currentActualValue.toDouble > lv(0).toDouble && lv(0).toDouble > lv(1).toDouble && lv(1).toDouble > lv(2).toDouble && lv(2).toDouble > lv(3).toDouble) {
+//        var str = ""
+//        if (map.contains("predIndexCName")) {
+//          str += map.contains("predIndexCName")
+//        }
+//        str += new String("实测值持续5周期呈上升趋势告警,{")
+//        str += res.currentActualValue + "," + lv(0) + "," + lv(1) + "," + lv(2) + "," + lv(3) + "}"
+//        return new AlarmResult(str)
+//      }
+//    }
+//    null
+//  }
+
+  /**
+    * 对应规则ID=8的判断逻辑
+    * 规则8，指标实测值 持续3周期上升 2级告警
+    *
+    * @param res
+    * @return
+    */
+//  def ruleFunc8(res: PredResult, map: Map[String, String]): AlarmResult = {
+////    val conn = ConnPoolUtil2.getConn()
+//    val lv = alarmDao.findLatelyPredResult(res, conn)
+//    if (lv != null && lv.size >= 5) {
+//      if (res.getCurrentActualValue.toDouble > lv(0).toDouble && lv(0).toDouble > lv(1).toDouble) {
+//        return new AlarmResult("预测指标发生告警，指标实测值连续三周期持续上升!!")
+//      }
+//    }
+//    null
+//  }
+
+  /**
+    *
+    * @param res
+    * @param map
+    * @return
+    */
+  def ruleFunc9(res: PredResult,conn:Connection): AlarmResult = {
+    val lv = alarmDao.findLatelyPredResult(res, conn)
+    val currentValue = res.getCurrentActualValue.toDouble
+    try {
+      if (lv != null && lv.size>=5) {
+        val m0=currentValue - lv(0).toDouble
+        val m01=lv(0).toDouble - lv(1).toDouble
+        val m12=lv(1).toDouble - lv(2).toDouble
+        val m23=lv(2).toDouble - lv(3).toDouble
+        //val m34=lv(3).toDouble - lv(4).toDouble
+        //val m04=lv(0).toDouble - lv(4).toDouble
+        val m3 =lv(3).toDouble
+        if (m0-m01 > 0 && m01-m12 >0 && m12-m23 >0 && currentValue > 4*m3) {
+          return new AlarmResult(res.getPredIndexName +"监测指标发生告警，指标实测值连续五周期同比持续上升!!")
+        }
+      }
+    } catch {
+      case e: Exception => logger.error("ruleFunc9 Exception!!! " + e.printStackTrace())
+    }
+    null
+  }
+
+  /**
+    * 拼接告警结果相关信息
+    *
+    * @param pred 预测结果
+    * @param mRes 配置信息一级规则信息
+    * @return
+    */
+  private def appendAlarmInfo(pred: PredResult, mRes: Map[String, String]): String = {
+    //indexName将在5/15/30/60分钟后超出/低于阀值,{预测下限:xx,预测值:xx,预测上限:xx,告警阀值:xx}
+    val sb = new StringBuilder("")
+    if (mRes.contains("predIndexCName")) {
+      sb.append(mRes("predIndexCName")).append(new String("将在".getBytes, "UTF-8"))
+    }
+    if ("00".equals(pred.getPredPeriod)) {
+      sb.append("5")
+    } else if ("01".equals(pred.getPredPeriod)) {
+      sb.append("15")
+    } else if ("02".equals(pred.getPredPeriod)) {
+      sb.append("30")
+    } else if ("03".equals(pred.getPredPeriod)) {
+      sb.append("60")
+    }
+    sb.append(new String("分钟后超出阀值,{预测下限:".getBytes, "UTF-8"))
+    sb.append(pred.getNextPredMinValue)
+    sb.append(new String(",预测值:".getBytes, "UTF-8"))
+    sb.append(pred.getNextPredValue)
+    sb.append(new String(",预测上限:".getBytes, "UTF-8"))
+    sb.append(pred.getNextPredMaxValue)
+    sb.append(new String(",告警阀值(低-中-高):".getBytes, "UTF-8"))
+    if (mRes.contains("confLowValue")) {
+      sb.append(mRes("confLowValue") + ",")
+    }
+    if (mRes.contains("confMidValue")) {
+      sb.append(mRes("confMidValue") + ",")
+    }
+    if (mRes.contains("confHighValue")) {
+      sb.append(mRes("confHighValue") + "｝")
+    }
+    logger.info(sb.toString())
+    sb.toString()
+  }
+
+  /**
+    * 将告警信息写入文件(no use)
+    *
+    * @param alarmResult 告警结果信息
+    */
+  private def write2File(alarmResult: AlarmResult, conn: Connection): Unit = {
+    val fileDir = props.getProperty("alarm.result.dir")
+    val fileName = props.getProperty("alarm.result.file.prefix") + DateUtil.getCurrentTimeYMDHMS
+    val res0 = alarmDao.findAlarmResult(alarmResult, conn)
+    val objectMapper = new ObjectMapper()
+    if (res0 != null) {
+      val alarmJSON = objectMapper.writeValueAsString(res0)
+      FileUtils.write2Path(fileDir, fileName, alarmJSON, true)
+    }
+
+  }
+}

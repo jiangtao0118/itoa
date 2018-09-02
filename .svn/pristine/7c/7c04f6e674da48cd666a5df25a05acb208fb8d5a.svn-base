@@ -1,0 +1,635 @@
+package com.wisdom.spark.etl.DataProcessing
+
+import java.text.{DecimalFormat, SimpleDateFormat}
+import java.util
+import java.util.Date
+import java.util.concurrent.ConcurrentHashMap
+
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.wisdom.spark.common.ExecutorState
+import com.wisdom.spark.common.bean.{PredResult, RelationAnalysis}
+import com.wisdom.spark.common.util.{ItoaPropertyUtil, SparkContextUtil, SysConst}
+import com.wisdom.spark.etl.util.InitUtil
+import com.wisdom.spark.etl.bean.ModelBean
+import com.wisdom.spark.etl.ppn.Complex
+import com.wisdom.spark.ml.mlUtil.ModelUtil
+import com.wisdom.spark.ml.tgtVar.AllPredcictTarget
+import com.wisdom.spark.streaming.thread.Thread4InitialModelObj
+import org.apache.log4j.Logger
+
+import scala.collection.mutable.ArrayBuffer
+import scala.util.control.Breaks
+
+/**
+  * 实时数据处理
+  * Created by wisdom on 2016/11/18.
+  */
+object RealTimeDataProcessingNew extends Serializable {
+
+  def main(args: Array[String]) {
+    val properties = ItoaPropertyUtil.getProperties()
+    val map = Thread4InitialModelObj.getModelMap()
+    val init = new InitUtil(properties, map)
+    val sc = SparkContextUtil.getInstance()
+    val files = sc.textFile(init.commonInputPath + "*")
+    files.foreach(dataProcessing(init, args(0), _, "prediction"))
+
+    sc.stop()
+  }
+
+  /**
+    * 数据处理
+    *
+    * @param tableName  表名或者系统名，必须有至少两个下划线，如application_server_001
+    * @param kafkaData  文档内容
+    * @param resultType prediction或relationAnalysis
+    * @return 实测值、预测值相关信息
+    */
+  def dataProcessing(initUtil: InitUtil, tableName: String, kafkaData: String, resultType: String): Map[String, List[Any]] = {
+    //TODO 使用------------------------allfields------------------------数据 START
+    @transient
+    val logger = Logger.getLogger(this.getClass)
+    logger.warn("*************************initUtil.targetMap.contains.RealTimeDataProcessing.kafkaData" + tableName + "\n" + kafkaData + "*************************")
+
+    var resultMap = Map[String, List[Any]]()
+    var list_Pre = List[Any]()
+    var list_Rel = List[Any]()
+
+    val startTime = System.currentTimeMillis()
+    try {
+      var systemName = "NotExistHost"
+      if (tableName != null && tableName != "") {
+        val allSystem = initUtil.allSystem
+        val allSystemTemp = initUtil.allSystemTemp
+        val break = new Breaks
+        break.breakable(
+          for (i <- allSystem.indices) {
+            if (tableName.toUpperCase().contains(allSystemTemp(i).toUpperCase())) {
+              systemName = allSystem(i).toUpperCase()
+              break.break()
+            }
+          }
+        )
+
+        if (!initUtil.systemMap.containsKey(systemName)) {
+          logger.error("*************************systemName----tablename" + systemName + "------" + tableName + "表名信息不在配置文件中*************************")
+          resultMap += (SysConst.MAP_PRED_RESULT_KEY -> list_Pre)
+          resultMap += (SysConst.MAP_RELATION_ANALYSIS_KEY -> list_Rel)
+          return resultMap
+        }
+      } else {
+        logger.error("*************************systemName----tablename" + systemName + "------" + tableName + "记录可能为空*************************")
+        resultMap += (SysConst.MAP_PRED_RESULT_KEY -> list_Pre)
+        resultMap += (SysConst.MAP_RELATION_ANALYSIS_KEY -> list_Rel)
+        return resultMap
+      }
+
+      val currentBean = initUtil.systemMap.get(systemName)
+      val delimiter = currentBean.getDelimiter
+      val record = initUtil.dataFormat(kafkaData, systemName, delimiter)
+
+      val currentFieldList = currentBean.fieldList
+
+      //实测值
+      var actual = "0"
+      //时间戳字段
+      val timeStamp = record.split(delimiter)(currentBean.getTimestampIndex.toInt)
+      logger.info("*************************SystemName+时间戳" + systemName + timeStamp + "*************************")
+      val fftIndex = initUtil.getFFTIndex(timeStamp)
+      logger.info("*************************SystemName+FFTIndex" + systemName + fftIndex + "*************************")
+      val hostname = record.split(delimiter)(currentBean.getHostNameInfo).split(":")(currentBean.getHostNameIndex).toUpperCase()
+      //TODO 使用------------------------allfields------------------------数据 END
+
+
+      //不包含要处理的主机，直接返回错误信息
+      val modelId = systemName + "_" + hostname
+
+      var predictionField = currentBean.getPredictionField
+
+      val predResult = new PredResult
+      predResult.setCurrentDataTime(initUtil.getTimeStamp(timeStamp).toString)
+      predResult.setHostName(hostname)
+      predResult.setPredIndexName(predictionField)
+      predResult.setSysName(systemName)
+
+      val relationAnalysis = new RelationAnalysis
+      relationAnalysis.setCurrentDataTime(initUtil.getTimeStamp(timeStamp).toString)
+      relationAnalysis.setHostName(hostname)
+      relationAnalysis.setPredIndexName(predictionField)
+      relationAnalysis.setSysName(systemName)
+      //      predResult.setPredPeriod(predictionPeriod.toString)
+
+      if (!initUtil.targetMap.contains(modelId)) {
+        predResult.setExecutorState(ExecutorState.ignore_this_host)
+        relationAnalysis.setExecutorState(ExecutorState.ignore_this_host)
+        logger.error("*************************" + predResult.toString + "*************************")
+        list_Pre = list_Pre.::(predResult)
+        list_Rel = list_Rel.::(relationAnalysis)
+        resultMap += (SysConst.MAP_PRED_RESULT_KEY -> list_Pre)
+        resultMap += (SysConst.MAP_RELATION_ANALYSIS_KEY -> list_Rel)
+        resultMap
+      } else {
+        var data: String = initUtil.getNeededFields(record, currentFieldList, delimiter)
+        data = initUtil.NaNToNumeric(data)
+
+        logger.info("*************************initUtil.targetMap.contains.RealTimeDataProcessing.data" + systemName + "------" + data + "*************************")
+
+        var modelBean = new ModelBean
+        modelBean = initUtil.targetMap.get(modelId).get
+        //最前一条如果为空，使用data填充，不为空，依次向前覆盖
+        if (modelBean.getCurrent_3 == "") {
+          modelBean.setCurrent_3(initUtil.stripTimestamp(data))
+          modelBean.setCurrent_2(initUtil.stripTimestamp(data))
+          modelBean.setCurrent_1(data)
+          modelBean.setCurrent(data)
+        } else {
+          modelBean.setCurrent_3(modelBean.getCurrent_2)
+          modelBean.setCurrent_2(initUtil.stripTimestamp(modelBean.getCurrent_1))
+          modelBean.setCurrent_1(modelBean.getCurrent)
+          modelBean.setCurrent(data)
+        }
+
+        if (modelBean.getCurrent_3 != "") {
+          val column_current_3 = modelBean.getCurrent_3
+          val column_current_2 = modelBean.getCurrent_2
+          val column_current_1 = modelBean.getCurrent_1
+          val column_current = modelBean.getCurrent
+          val column_current_1_striptimestamp = initUtil.stripTimestamp(column_current_1)
+          val column_current_striptimestamp = initUtil.stripTimestamp(column_current)
+          var m01 = "-1"
+          var m12 = "-1"
+          var m23 = "-1"
+          try {
+            m01 = minus(column_current_striptimestamp, column_current_1_striptimestamp)
+            m12 = minus(column_current_1_striptimestamp, column_current_2)
+            m23 = minus(column_current_2, column_current_3)
+          } catch {
+            case e: Exception => logger.error("*************************minusException*************************")
+          }
+          //TODO 修改配置文件，增加multiTargets
+          var map = Map[String, String]()
+          val targets = currentBean.getPredictionFields
+
+          val arr = targets.split(",")
+          val n = arr.length
+          for (i <- 0 until n) {
+            //获取实测值
+            try {
+              actual = column_current.split(",")(currentBean.getPredictionFieldsMap.get(systemName + "_" + arr(i)))
+              if ("Unix_Memory".equalsIgnoreCase(systemName) || "System".equalsIgnoreCase(systemName)) {
+                logger.info("*************************" + "已相减,原值为actual" + actual + "---索引为" + currentBean.getPredictionFieldsMap.get(systemName + "_" + arr(i)) + "*************************")
+
+                actual = (100 - actual.toDouble).toString
+              }
+              val df = new DecimalFormat("0.00")
+              actual = df.format(actual.toDouble)
+            } catch {
+              case e: Exception => actual = "-1"
+                logger.error("*************************" + "Can not find predictionFieldIndex" + "*************************")
+            }
+
+            logger.info("*************************实测值:" + actual + "*************************")
+            logger.info("*************************当前时刻数据时间:" + timeStamp + "*************************")
+
+            map += ("predictionField_" + i -> arr(i).toUpperCase())
+            map += ("fft_5_" + i -> "0")
+            map += ("fft_15_" + i -> "0")
+            map += ("fft_30_" + i -> "0")
+            map += ("fft_60_" + i -> "0")
+
+
+            if (initUtil.DFTModelMap.containsKey(systemName + "_" + hostname + "_" + arr(i).toUpperCase())) {
+              try {
+                val fftModel = initUtil.DFTModelMap.get(systemName + "_" + hostname + "_" + arr(i).toUpperCase())
+
+                //                try{
+                //                  logger.warn("*************************:FFT Length"+fftModel.length+"*************************")
+                //                  logger.warn("*************************:FFT(0)"+fftModel(0)+"*************************")
+                //                  logger.warn("*************************:FFT re"+fftModel(0).re()+"*************************")
+                //                }catch {
+                //                  case e:Exception=>
+                //                    logger.error("*************************:FFT ERROR*************************")
+                //                }
+
+
+                if ("OPMDB".equalsIgnoreCase(systemName)) {
+                  map += ("predictionField_" + i -> arr(i).toUpperCase())
+                  map += ("fft_5_" + i -> fftModel((fftIndex + 5)%2016).toString)
+                  map += ("fft_15_" + i -> fftModel((fftIndex + 15)%2016).toString)
+                  map += ("fft_30_" + i -> fftModel((fftIndex + 30)%2016).toString)
+                  map += ("fft_60_" + i -> fftModel((fftIndex + 60)%2016).toString)
+                } else {
+                  map += ("predictionField_" + i -> arr(i).toUpperCase())
+                  map += ("fft_5_" + i -> fftModel((fftIndex + 1)%2016).toString)
+                  map += ("fft_15_" + i -> fftModel((fftIndex + 3)%2016).toString)
+                  map += ("fft_30_" + i -> fftModel((fftIndex + 6)%2016).toString)
+                  map += ("fft_60_" + i -> fftModel((fftIndex + 12)%2016).toString)
+                }
+              } catch {
+                case e: Exception =>
+                  logger.error("*************************:FFT Error" + systemName + "_" + hostname + "_" + arr(i) + "*************************")
+              }
+
+            }
+            logger.warn("*************************FFT prediction value" + map.get("fft_5_" + i).get + "*************************")
+            val MDHM = initUtil.getGMMTimeStamp(timeStamp)
+            val mer_str_5 = mergeArr(MDHM, column_current_striptimestamp, column_current_1_striptimestamp, column_current_2, column_current_3, m01, m12, m23, map.get("fft_5_" + i).get)
+            val mer_str_15 = mergeArr(MDHM, column_current_striptimestamp, column_current_1_striptimestamp, column_current_2, column_current_3, m01, m12, m23, map.get("fft_15_" + i).get)
+            val mer_str_30 = mergeArr(MDHM, column_current_striptimestamp, column_current_1_striptimestamp, column_current_2, column_current_3, m01, m12, m23, map.get("fft_30_" + i).get)
+            val mer_str_60 = mergeArr(MDHM, column_current_striptimestamp, column_current_1_striptimestamp, column_current_2, column_current_3, m01, m12, m23, map.get("fft_60_" + i).get)
+
+            //            logger.warn("*************************merge_str_5:"+mer_str_5.mkString(",")+"*************************")
+
+            val timeStampTemp = initUtil.getTimeStamp(timeStamp).toString
+
+            predictionField = map.get("predictionField_" + i).get
+            var flag1 = false
+            var flag2 = false
+            var flag3 = false
+            var flag4 = false
+
+            if ("prediction".equalsIgnoreCase(resultType)) {
+              val predResult5 = new PredResult
+              predResult5.setCurrentDataTime(timeStampTemp)
+              predResult5.setHostName(hostname)
+              predResult5.setPredIndexName(predictionField)
+              predResult5.setSysName(systemName)
+
+
+              val predResult15 = new PredResult
+              predResult15.setCurrentDataTime(timeStampTemp)
+              predResult15.setHostName(hostname)
+              predResult15.setPredIndexName(predictionField)
+              predResult15.setSysName(systemName)
+
+              val predResult30 = new PredResult
+              predResult30.setCurrentDataTime(timeStampTemp)
+              predResult30.setHostName(hostname)
+              predResult30.setPredIndexName(predictionField)
+              predResult30.setSysName(systemName)
+
+              val predResult1H = new PredResult
+              predResult1H.setCurrentDataTime(timeStampTemp)
+              predResult1H.setHostName(hostname)
+              predResult1H.setPredIndexName(predictionField)
+              predResult1H.setSysName(systemName)
+
+              val predictStartTime = System.currentTimeMillis()
+
+
+              new Thread(new Runnable {
+                override def run(): Unit = {
+                  try {
+                    var predictionResult = new Array[Double](3)
+                    //                    initUtil.modelMap
+                    if (initUtil.modelMap.containsKey(predictionField.toUpperCase + "_0" + "_" + hostname)) {
+                      val allPredictTarget = initUtil.modelMap.get(predictionField.toUpperCase + "_0" + "_" + hostname)
+                      if (allPredictTarget != null) {
+                        predictionResult = allPredictTarget.predict(predictionField.toUpperCase + "_0", hostname, mer_str_5)
+                        predResult5.setCurrentActualValue(actual)
+                        predResult5.setExecutorState(ExecutorState.success)
+                        predResult5.setNextPredValue(predictionResult(0).toString)
+                        predResult5.setNextPredMinValue(predictionResult(1).toString)
+                        predResult5.setNextPredMaxValue(predictionResult(2).toString)
+                        predResult5.setPredPeriod("00")
+                        logger.warn("*************************GMM prediction_0" + predictionResult.mkString(",") + "*************************")
+                      } else {
+                        logger.error("*************************模型为空" + "*************************")
+                      }
+
+                    } else {
+                      logger.error("*************************没有模型" + "*************************")
+                    }
+                  } catch {
+                    case e: Exception =>
+                      predResult5.setExecutorState(ExecutorState.prediction_exception)
+                      logger.error("*************************预测异常" + e.printStackTrace() + "*************************")
+                  }
+                  flag1 = true
+                  list_Pre = list_Pre.::(predResult5)
+                }
+              }).start()
+
+
+
+              new Thread(new Runnable {
+                override def run(): Unit = {
+                  try {
+                    var predictionResult = new Array[Double](3)
+                    if (initUtil.modelMap.containsKey(predictionField.toUpperCase + "_1" + "_" + hostname)) {
+
+                      val allPredictTarget = initUtil.modelMap.get(predictionField.toUpperCase + "_1" + "_" + hostname)
+                      if (allPredictTarget != null) {
+
+                        predictionResult = allPredictTarget.predict(predictionField.toUpperCase + "_1", hostname, mer_str_15)
+                        predResult15.setCurrentActualValue(actual)
+                        predResult15.setExecutorState(ExecutorState.success)
+                        predResult15.setNextPredValue(predictionResult(0).toString)
+                        predResult15.setNextPredMinValue(predictionResult(1).toString)
+                        predResult15.setNextPredMaxValue(predictionResult(2).toString)
+                        predResult15.setPredPeriod("01")
+                        logger.warn("*************************GMM prediction_1预测值" + predictionResult.mkString(",") + "*************************")
+
+                      } else {
+                        logger.error("*************************模型为空" + "*************************")
+                      }
+
+                    } else {
+                      logger.error("*************************没有模型" + "*************************")
+                    }
+
+                  } catch {
+                    case e: Exception =>
+                      predResult15.setExecutorState(ExecutorState.prediction_exception)
+                      logger.error("*************************预测异常" + e.printStackTrace() + "*************************")
+                  }
+                  flag2 = true
+                  list_Pre = list_Pre.::(predResult15)
+                }
+              }).start()
+
+              new Thread(new Runnable {
+                override def run(): Unit = {
+                  try {
+                    var predictionResult = new Array[Double](3)
+                    if (initUtil.modelMap.containsKey(predictionField.toUpperCase + "_2" + "_" + hostname)) {
+                      val allPredictTarget = initUtil.modelMap.get(predictionField.toUpperCase + "_2" + "_" + hostname)
+                      if (allPredictTarget != null) {
+
+                        predictionResult = allPredictTarget.predict(predictionField.toUpperCase + "_2", hostname, mer_str_30)
+                        predResult30.setCurrentActualValue(actual)
+                        predResult30.setExecutorState(ExecutorState.success)
+                        predResult30.setNextPredValue(predictionResult(0).toString)
+                        predResult30.setNextPredMinValue(predictionResult(1).toString)
+                        predResult30.setNextPredMaxValue(predictionResult(2).toString)
+                        predResult30.setPredPeriod("02")
+                        logger.warn("*************************GMM_30预测值" + predictionResult.mkString(",") + "*************************")
+
+                      } else {
+                        logger.error("*************************模型为空" + "*************************")
+                      }
+
+                    } else {
+
+                      logger.error("*************************没有模型" + "*************************")
+                    }
+
+                  } catch {
+                    case e: Exception =>
+                      predResult30.setExecutorState(ExecutorState.prediction_exception)
+                      logger.error("*************************预测异常" + e.printStackTrace() + "*************************")
+                  }
+                  flag3 = true
+                  list_Pre = list_Pre.::(predResult30)
+                }
+              }).start()
+
+              new Thread(new Runnable {
+                override def run(): Unit = {
+                  try {
+                    var predictionResult = new Array[Double](3)
+                    if (initUtil.modelMap.containsKey(predictionField.toUpperCase + "_3" + "_" + hostname)) {
+                      val allPredictTarget = initUtil.modelMap.get(predictionField.toUpperCase + "_3" + "_" + hostname)
+                      if (allPredictTarget != null) {
+                        predictionResult = allPredictTarget.predict(predictionField.toUpperCase + "_3", hostname, mer_str_60)
+                        predResult1H.setCurrentActualValue(actual)
+                        predResult1H.setExecutorState(ExecutorState.success)
+                        predResult1H.setNextPredValue(predictionResult(0).toString)
+                        predResult1H.setNextPredMinValue(predictionResult(1).toString)
+                        predResult1H.setNextPredMaxValue(predictionResult(2).toString)
+                        predResult1H.setPredPeriod("03")
+                        logger.warn("*************************GMM_60预测值" + predictionResult.mkString(",") + "*************************")
+
+                      } else {
+                        logger.error("*************************模型为空" + "*************************")
+                      }
+
+                    } else {
+                      logger.error("*************************没有模型" + "*************************")
+                    }
+                  } catch {
+                    case e: Exception =>
+                      predResult1H.setExecutorState(ExecutorState.prediction_exception)
+                      logger.error("*************************预测异常" + e.printStackTrace() + "*************************")
+                  }
+                  flag4 = true
+                  list_Pre = list_Pre.::(predResult1H)
+                }
+              }).start()
+
+              while (!flag1 || !flag2 || !flag3 || !flag4) {
+                logger.warn("*************************等待预测结束*************************")
+                Thread.sleep(initUtil.predictionWaitTime)
+              }
+
+              val predictEndTime = System.currentTimeMillis()
+              logger.warn("------------  预测耗时  ------------：" + (predictEndTime - predictStartTime) + "ms")
+              logger.warn("*************************RealTimeDataProcessing prediction success:" + predResult5.toString + "*************************")
+            } else if ("relationAnalysis".equalsIgnoreCase(resultType)) {
+              val relationStartTime = System.currentTimeMillis()
+              val obj = new ObjectMapper()
+              val relationAnalysis5 = new RelationAnalysis
+              relationAnalysis5.setCurrentDataTime(timeStampTemp)
+              relationAnalysis5.setHostName(hostname)
+              relationAnalysis5.setPredIndexName(predictionField)
+              relationAnalysis5.setSysName(systemName)
+
+              val relationAnalysis15 = new RelationAnalysis
+              relationAnalysis15.setCurrentDataTime(timeStampTemp)
+              relationAnalysis15.setHostName(hostname)
+              relationAnalysis15.setPredIndexName(predictionField)
+              relationAnalysis15.setSysName(systemName)
+
+              val relationAnalysis30 = new RelationAnalysis
+              relationAnalysis30.setCurrentDataTime(timeStampTemp)
+              relationAnalysis30.setHostName(hostname)
+              relationAnalysis30.setPredIndexName(predictionField)
+              relationAnalysis30.setSysName(systemName)
+
+              val relationAnalysis1H = new RelationAnalysis
+              relationAnalysis1H.setCurrentDataTime(timeStampTemp)
+              relationAnalysis1H.setHostName(hostname)
+              relationAnalysis1H.setPredIndexName(predictionField)
+              relationAnalysis1H.setSysName(systemName)
+
+
+              new Thread(new Runnable {
+                override def run(): Unit = {
+                  try {
+                    var relationAnalysisResultJSON = ""
+                    if (initUtil.modelMap.containsKey(predictionField.toUpperCase + "_0" + "_" + hostname)) {
+                      val allPredictTarget = initUtil.modelMap.get(predictionField.toUpperCase + "_0" + "_" + hostname)
+                      val relationAnalysisResultMap = allPredictTarget.sensitivityAnalysis(predictionField.toUpperCase + "_0", hostname, mer_str_5)
+                      relationAnalysisResultJSON = obj.writeValueAsString(relationAnalysisResultMap)
+                      relationAnalysis5.setAnalysisResult(relationAnalysisResultJSON)
+                      relationAnalysis5.setExecutorState(ExecutorState.success)
+                      relationAnalysis5.setPredPeriod("00")
+                      logger.warn("*************************GMM_5关联分析值" + relationAnalysisResultJSON + "*************************")
+                    } else {
+                      logger.error("*************************没有模型" + "*************************")
+                    }
+                  } catch {
+                    case e: Exception => relationAnalysis5.setExecutorState(ExecutorState.relationAnalysis_exception)
+                      logger.error("*************************关联分析异常" + "*************************")
+                  }
+                  flag1 = true
+                  list_Rel = list_Rel.::(relationAnalysis5)
+                }
+              }).start()
+
+              new Thread(new Runnable {
+                override def run(): Unit = {
+                  try {
+                    var relationAnalysisResultJSON = ""
+                    if (initUtil.modelMap.containsKey(predictionField.toUpperCase + "_1" + "_" + hostname)) {
+                      val allPredictTarget = initUtil.modelMap.get(predictionField.toUpperCase + "_1" + "_" + hostname)
+                      val relationAnalysisResultMap = allPredictTarget.sensitivityAnalysis(predictionField.toUpperCase + "_1", hostname, mer_str_15)
+                      relationAnalysisResultJSON = obj.writeValueAsString(relationAnalysisResultMap)
+                      relationAnalysis15.setAnalysisResult(relationAnalysisResultJSON)
+                      relationAnalysis15.setExecutorState(ExecutorState.success)
+                      relationAnalysis15.setPredPeriod("01")
+                      logger.warn("*************************GMM_15关联分析值" + relationAnalysisResultJSON + "*************************")
+                    } else {
+                      logger.error("*************************没有模型" + "*************************")
+                    }
+                  } catch {
+                    case e: Exception => relationAnalysis15.setExecutorState(ExecutorState.relationAnalysis_exception)
+                      logger.error("*************************关联分析异常" + "*************************")
+                  }
+                  flag2 = true
+                  list_Rel = list_Rel.::(relationAnalysis15)
+                }
+              }).start()
+
+              new Thread(new Runnable {
+                override def run(): Unit = {
+                  try {
+                    var relationAnalysisResultJSON = ""
+                    if (initUtil.modelMap.containsKey(predictionField.toUpperCase + "_2" + "_" + hostname)) {
+                      val allPredictTarget = initUtil.modelMap.get(predictionField.toUpperCase + "_2" + "_" + hostname)
+                      val relationAnalysisResultMap = allPredictTarget.sensitivityAnalysis(predictionField.toUpperCase + "_2", hostname, mer_str_30)
+                      relationAnalysisResultJSON = obj.writeValueAsString(relationAnalysisResultMap)
+                      relationAnalysis30.setAnalysisResult(relationAnalysisResultJSON)
+                      relationAnalysis30.setExecutorState(ExecutorState.success)
+                      relationAnalysis30.setPredPeriod("02")
+                      logger.warn("*************************GMM_30关联分析值" + relationAnalysisResultJSON + "*************************")
+                    } else {
+                      logger.error("*************************没有模型" + "*************************")
+                    }
+                  } catch {
+                    case e: Exception => relationAnalysis30.setExecutorState(ExecutorState.relationAnalysis_exception)
+                      logger.error("*************************关联分析异常" + "*************************")
+                  }
+                  flag3 = true
+                  list_Rel = list_Rel.::(relationAnalysis30)
+                }
+              }).start()
+
+              new Thread(new Runnable {
+                override def run(): Unit = {
+                  try {
+                    var relationAnalysisResultJSON = ""
+                    if (initUtil.modelMap.containsKey(predictionField.toUpperCase + "_3" + "_" + hostname)) {
+                      val allPredictTarget = initUtil.modelMap.get(predictionField.toUpperCase + "_3" + "_" + hostname)
+                      val relationAnalysisResultMap = allPredictTarget.sensitivityAnalysis(predictionField.toUpperCase + "_3", hostname, mer_str_60)
+                      relationAnalysisResultJSON = obj.writeValueAsString(relationAnalysisResultMap)
+                      relationAnalysis1H.setAnalysisResult(relationAnalysisResultJSON)
+                      relationAnalysis1H.setExecutorState(ExecutorState.success)
+                      relationAnalysis1H.setPredPeriod("03")
+                      logger.warn("*************************GMM_60关联分析值" + relationAnalysisResultJSON + "*************************")
+                    } else {
+                      logger.error("*************************没有模型" + "*************************")
+                    }
+                  } catch {
+                    case e: Exception => relationAnalysis1H.setExecutorState(ExecutorState.relationAnalysis_exception)
+                      logger.error("*************************关联分析异常" + "*************************")
+                  }
+                  flag4 = true
+                  list_Rel = list_Rel.::(relationAnalysis1H)
+                }
+              }).start()
+
+              //              while(flag1&&flag2&&flag3&&flag4){
+              //                logger.warn("*************************等待关联分析结束*************************")
+              //                Thread.sleep(200)
+              //              }
+              while (!flag1 || !flag2 || !flag3 || !flag4) {
+                logger.warn("*************************等待关联分析结束*************************")
+                Thread.sleep(initUtil.relationWaitTime)
+              }
+
+              val relationEndTime = System.currentTimeMillis()
+              logger.warn("------------  关联分析耗时  ------------：" + (relationEndTime - relationStartTime) + "ms")
+            }
+
+          }
+
+        }
+
+        resultMap += (SysConst.MAP_PRED_RESULT_KEY -> list_Pre)
+        resultMap += (SysConst.MAP_RELATION_ANALYSIS_KEY -> list_Rel)
+        val endTime = System.currentTimeMillis()
+        logger.warn("------------  处理一条数据总耗时  ------------：" + (endTime - startTime) + "ms")
+        resultMap
+      }
+    } catch {
+      case e: Exception => e.getStackTraceString
+        logger.error("*************************RealTimeDataProcessingException" +e.getStackTraceString+"\n"+ kafkaData + "\n" + " *************************")
+        var resultMap = Map[String, List[Any]]()
+        var list_Pre = List[Any]()
+        var list_Rel = List[Any]()
+        val predResult = new PredResult
+        val relationAnalysis = new RelationAnalysis
+        predResult.setExecutorState(ExecutorState.other_exception)
+        relationAnalysis.setExecutorState(ExecutorState.other_exception)
+        list_Pre = list_Pre.::(predResult)
+        list_Rel = list_Rel.::(relationAnalysis)
+        resultMap += (SysConst.MAP_PRED_RESULT_KEY -> list_Pre)
+        resultMap += (SysConst.MAP_RELATION_ANALYSIS_KEY -> list_Rel)
+        resultMap
+    }
+
+  }
+
+  /**
+    * 207-209,5-4,6-8...
+    *
+    * @param a is Array[String],like Array((207,5,6,89,0,2)(208,2,1,96,0,4))
+    * @param b is Array[String],like Array((209,4,8,11,0,2)(210,5,4,96,0,4))
+    * @return Array[String]
+    */
+
+  def minus(a: String, b: String): String = {
+    //println("a-b="+a(i).toDouble+"-"+b(i).toDouble)
+    val tempA: Array[String] = a.split(",")
+    val tempB: Array[String] = b.split(",")
+    val sb: StringBuilder = new StringBuilder
+    for (j <- tempA.indices) {
+      sb.append((tempA(j).toDouble - tempB(j).toDouble).toString)
+      if (j < tempA.length - 1) {
+        sb.append(",")
+      }
+    }
+
+    sb.toString()
+  }
+
+
+  def mergeArr(MDHM: String, column_current: String, column_current_1: String, column_current_2: String, column_current_3: String, m01: String, m12: String, m23: String, fft: String): Array[Double] = {
+    @transient
+    val logger = Logger.getLogger(this.getClass)
+    val arrStr = MDHM + "," + column_current + "," + column_current_1 + "," + column_current_2 + "," + column_current_3 + "," + m01 + "," + m12 + "," + m23 + "," + fft
+    val arrDou = new ArrayBuffer[Double]()
+    val cols = arrStr.split(",")
+    try {
+      for (col <- cols) {
+        arrDou.append(col.toDouble)
+        //print(col.toDouble+"***")
+      }
+    } catch {
+      case e: Exception => logger.error("*************************" + "mergeArrayError" + "*************************")
+    }
+    arrDou.toArray
+  }
+
+}

@@ -1,0 +1,225 @@
+package com.wisdom.spark.ml.features
+
+import java.util.Calendar
+
+import org.apache.spark.ml.feature.{StandardScaler, StandardScalerModel}
+import org.apache.spark.mllib.linalg.Vectors
+import org.apache.spark.sql.DataFrame
+import com.wisdom.spark.ml.mlUtil._
+import org.apache.log4j.Logger
+
+/**
+  * Created by wisdom on 2016/11/12.
+  * 经标准化的样本数据的协方差矩阵就是原始样本数据的相关矩阵。这里所说的标准化指正态化，即将原始数据处理成均值为0，方差为1的标准数据。
+  */
+class StandardScalerExt extends Serializable {
+
+  def transformAndSave(inPath: String, outDataPath: String, outModelPath: String): DataFrame = {
+
+//    @transient
+//    val logger = ContextUtil.logger
+
+    val csvFilePath = inPath
+    val dataPath = outDataPath
+    val modelPath = outModelPath
+
+    val data = DataFrameUtil.readCsv(csvFilePath)
+
+    val output = DataFrameUtil.dfToDFofVector(data, data.columns, "features").select("features")
+
+
+    /**
+      * StandardScaler accepts SparseVector unless you set withMean=True at creation.
+      * If you do need to de-mean, you have to deduct a (presumably non-zero) number from all the components,
+      * so the sparse vector won't be sparse any more.
+      */
+    val scaler = new StandardScaler()
+      .setInputCol("features")
+      .setOutputCol("scaledfeatures")
+      .setWithStd(true)
+      .setWithMean(true)
+
+    val scalerModel = scaler.fit(output)
+    val means = scalerModel.mean.toArray
+    val stds = scalerModel.std.toArray
+    val cols = data.columns
+    for (i <- 0 until means.length) {
+      println("z-score标准化: " + cols(i) + ", 均值: " + means(i) + ", 标准差: " + stds(i))
+    }
+
+    val scaledData = scalerModel.transform(output)
+    val scaledfeatures = scaledData.select("scaledfeatures")
+
+    val outDF = DataFrameUtil.dfofVectorToDF(scaledfeatures, data.schema)
+    DataFrameUtil.writeCsv(outDF, dataPath)
+    saveModel(scalerModel, modelPath)
+    outDF
+  }
+
+  def saveModel(model: StandardScalerModel, modelPath: String): Unit = {
+    val fileUri = modelPath + "/" + "stdScalerModel.obj"
+    PersitObjectUtil.writeObjectToFile(model, fileUri)
+  }
+
+  def getModel(modelPath: String): StandardScalerModel = {
+    val fileUri = modelPath + "/" + "stdScalerModel.obj"
+    PersitObjectUtil.readObjectFromFile(fileUri).asInstanceOf[StandardScalerModel]
+  }
+
+  //  def transform(inData:DataFrame,modelPath: String): DataFrame = {
+  //    val modelFile = modelPath
+  //    val scalerModel = StandardScalerModel.load(modelFile)
+  //    scalerModel.transform(inData)
+  //  }
+
+  //  def transform(inData:org.apache.spark.mllib.linalg.Vector,modelPath: String): org.apache.spark.mllib.linalg.Vector = {
+  //    val modelFile = modelPath
+  //    val scalerModel = StandardScalerModel.load(modelFile)
+  //    val mean = scalerModel.mean
+  //    val std = scalerModel.std
+  //
+  //    val out = new Array[Double](mean.size)
+  //    for(i<-0 to mean.size - 1){
+  //      if(std(i)==0.0){
+  //        out(i)=std(i)
+  //      }
+  //      else {
+  //        out(i)=(inData(i)-mean(i))/std(i)
+  //      }
+  //    }
+  //
+  //    Vectors.dense(out)
+  //
+  //  }
+
+  //  def invTransformAndSave(inPath: String,outDataPath: String,modelPath: String): DataFrame = {
+  //
+  //    val csvFile = inPath
+  //    val modelFile = modelPath
+  //    val outFile = outDataPath
+  //
+  //    val data=DataFrameUtil.readCsv(csvFile)
+  //    val cols = data.columns
+  //
+  //    val scalerModel = StandardScalerModel.load(modelFile)
+  //    val mean = scalerModel.mean
+  //    val std = scalerModel.std
+  //    val colExpr = new Array[String](cols.length)
+  //
+  //    for(i <- 0 to cols.length - 1 ) {
+  //      colExpr(i) = cols(i) + "*" + std(i) + "+" + mean(i) + " as " + cols(i)
+  //    }
+  //
+  //    val out = data.selectExpr(colExpr: _*)
+  //
+  //    DataFrameUtil.writeCsv(out,outFile)
+  //
+  //    out
+  //  }
+
+  def getMean(modelPath: String): Array[Double] = {
+    val modelFile = modelPath
+    val scalerModel = getModel(modelFile)
+    val mean = scalerModel.mean
+
+    mean.toArray
+  }
+
+  def getStd(modelPath: String): Array[Double] = {
+    val modelFile = modelPath
+    val scalerModel = getModel(modelFile)
+    val std = scalerModel.std
+
+    std.toArray
+  }
+
+  def getScaler(in: Array[Double], mean: Array[Double], std: Array[Double]): Array[Double] = {
+
+    val out = new Array[Double](in.size)
+    for (i <- 0 until out.length) {
+      if (std(i) == 0.0) {
+        out(i) = std(i)
+      }
+      else {
+        out(i) = (in(i) - mean(i)) / std(i)
+      }
+    }
+
+    out
+
+  }
+
+}
+
+object StandardScalerExt {
+
+  val usage =
+    """
+Usage:spark-submit --master yarn-client [spark options] --class StandardScalerExt JSparkML.jar <command args>
+
+<command args> :
+  transformAndSave inPath targetVar hostnode z-score标准化
+      |inPath 输入数据路径
+      |targetVar 预测指标 CPU_BUSY等
+      |hostnode 主机节点
+  invTransformAndSave inPath outDataPath modelPath z-score反标准化
+      |inPath 输入数据路径，应与训练模型时的数据结构完全一致
+      |outDataPath 反标准化数据输出路径
+      |modelPath 训练模型的保存路径
+    """
+
+  def main(args: Array[String]): Unit = {
+
+    val sc = ContextUtil.sc
+
+    if (args.length == 0) {
+      help()
+    }
+
+    val scaler = new StandardScalerExt()
+    val method = args(0)
+
+    if (method.equalsIgnoreCase("transformAndSave")) {
+      if (args.length != 4) {
+        help()
+      }
+      val inPath = args(1)
+      val tgt = args(2)
+      val hostnode = args(3)
+      val outDataPath = MLPathUtil.scalerDataPath(tgt, hostnode)
+      val modelPath = MLPathUtil.scalerModelPath(tgt, hostnode)
+
+      val scaledFeatures = scaler.transformAndSave(inPath,
+        outDataPath,
+        modelPath)
+
+      //保存所有字段名称
+      val scaledFeaturesCol = scaledFeatures.columns.mkString(",")
+      PropertyUtil.saveModelProperty(MLPathUtil.featureColsKey(tgt, hostnode), scaledFeaturesCol)
+    }
+    //    else if (method.equalsIgnoreCase("invTransformAndSave")) {
+    //      if (args.length != 4){
+    //        help()
+    //      }
+    //
+    //      val inPath = args(1)
+    //      val outDataPath = args(2)
+    //      val modelPath = args(3)
+    //
+    //      scaler.invTransformAndSave(inPath,
+    //        outDataPath,
+    //        modelPath)
+    //    }
+    else {
+      help()
+    }
+
+    ContextUtil.sc.stop()
+
+  }
+
+  def help(): Unit = {
+    println(usage)
+    System.exit(1)
+  }
+}

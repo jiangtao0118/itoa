@@ -1,0 +1,89 @@
+package com.wisdom.spark.streaming.thread
+
+import com.wisdom.spark.common.util.{ConnPoolUtil2, ItoaPropertyUtil, SparkContextUtil}
+import com.wisdom.spark.streaming.bean.AlarmConfiguration
+import com.wisdom.spark.streaming.dao.AlarmDao
+import org.apache.log4j.Logger
+import org.apache.spark.sql.hive.HiveContext
+
+/**
+  * Created by wisdom on 2017/4/28.
+  */
+object UpdateThreshold {
+  @transient
+  //日志实例
+  val logger = Logger.getLogger(this.getClass)
+  //获取数据库连接
+  val conn = ConnPoolUtil2.getConn()
+  val alarmDao = new AlarmDao
+  val props = ItoaPropertyUtil.getProperties()
+
+  def main(args: Array[String]) {
+    //公共方法：获取SparkContext
+    val sc = SparkContextUtil.getInstance()
+    val hiveCtx = new HiveContext(sc)
+    updateNcoThreshold(hiveCtx)
+    alarmDao.updateRCrel(conn)
+    ConnPoolUtil2.releaseCon(conn)
+    sc.stop()
+  }
+
+  //更新网络动态阈值
+  private def updateNcoThreshold(hiveCtx:HiveContext): Unit ={
+    //查询Hive，统计出节点、告警时刻、指标名和指标值
+    val lastoccurrence = (System.currentTimeMillis() / 1000L) - 600
+    val tempTable = hiveCtx.sql("select concat(substring(from_unixtime(lastoccurrence),12,4),(case when substring(from_unixtime(lastoccurrence),16,1) < '5' then '0' else '5' end)) as alarmTime," +
+      " * from ncoperf.reporter_status where lastoccurrence < " + lastoccurrence )
+    tempTable.registerTempTable("tempNcoperf")
+    logger.warn("~~~~~~~~~~~~~~~~~~~~~~~~ncoperf.reporter_status注册临时表结束~~~~~~~~~~~~~~~~~~~~~·")
+    val threshold_table = hiveCtx.sql("select node,alarmTime,alertgroup,devvendor,concat_ws(',',collect_list(concat(mibvalue))) as mibvalue " +
+      "from tempNcoperf  group by node,alarmTime,alertgroup,devvendor")
+    //RDD重分区分区数
+    val partitions = props.getProperty("kafka.data.partitions").toInt
+    threshold_table.repartition(partitions)
+    //缓存RDD
+    threshold_table.persist()
+    logger.warn("~~~~~~~~~~~~~~~~~~~~~~RDD缓存结束~~~~~~~~~~~~~~~~~~~~~~~~")
+    val alarmRulesDF = threshold_table.map(row => {
+      val mibvalues = row.getString(4).split(",").map(a => a.toDouble)
+      val mid_threshold = ARRstdev(mibvalues).avg
+      val low_threshold = mid_threshold - 2 * ARRstdev(mibvalues).stdev
+      val high_threshold = mid_threshold + 2 * ARRstdev(mibvalues).stdev
+      val hostname = row.getString(0)
+      val alarmTime = row.getString(1)
+      val predIndexName = row.getString(2)
+      val confDesc = "网络指标" + predIndexName + "告警阈值配置"
+      val ac: AlarmConfiguration = new AlarmConfiguration()
+      ac.setSysName("REPORTER_STATUS")
+      ac.setHostName(hostname)
+      ac.setIndexTyp("00")
+      ac.setAlarmTime(alarmTime)
+      ac.setPredIndexName(predIndexName)
+      ac.setConfDesc(confDesc)
+      ac.setConfMidValue(mid_threshold.toString)
+      ac.setConfLowValue(low_threshold.toString)
+      ac.setConfHighValue(high_threshold.toString)
+      ac
+    })
+    val alarmRulesList = alarmRulesDF.collect().toList
+    logger.warn("**** 开始批量保存告警阈值... ===> " + alarmRulesList)
+    alarmDao.saveAlarmConf(alarmRulesList, conn)
+
+  }
+
+
+  case class statistic(avg: Double, stdev: Double)
+
+  //统计字符串形式的数组，求出平均值和方差
+  def ARRstdev(arrDbl: Array[Double]): statistic = {
+
+    val avg = arrDbl.sum / arrDbl.length
+    var sum = 0.0
+    for (i <- arrDbl) {
+      sum += (i - avg) * (i - avg)
+    }
+    val stdev = math.sqrt(sum / (arrDbl.length - 1))
+    statistic(avg, stdev)
+  }
+
+}

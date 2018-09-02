@@ -1,0 +1,13 @@
+<component name="libraryTable">
+  <library name="dev_lib">
+    <CLASSES>
+      <root url="file://F:/jars/huawei/FusionInsight_V100R002C60U10SPC002_Services_ClientConfig/Spark/dev_lib" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES>
+      <root url="file://F:/jars/huawei/FusionInsight_V100R002C60U10SPC002_Services_ClientConfig/Spark/dev_lib" />
+    </SOURCES>
+    <jarDirectory url="file://F:/jars/huawei/FusionInsight_V100R002C60U10SPC002_Services_ClientConfig/Spark/dev_lib" recursive="false" />
+    <jarDirectory url="file://F:/jars/huawei/FusionInsight_V100R002C60U10SPC002_Services_ClientConfig/Spark/dev_lib" recursive="false" type="SOURCES" />
+  </library>
+</component>

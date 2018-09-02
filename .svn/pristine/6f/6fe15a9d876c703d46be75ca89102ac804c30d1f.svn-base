@@ -1,0 +1,36 @@
+package com.wisdom.spark.etl.util
+
+import java.util.concurrent.ConcurrentHashMap
+
+import com.wisdom.spark.common.util.{ItoaPropertyUtil, SparkContextUtil}
+import com.wisdom.spark.etl.DataProcessing.OfflineDataProcessing
+import com.wisdom.spark.ml.tgtVar.AllPredcictTarget
+import org.apache.spark.{SparkConf, SparkContext}
+
+/**
+  * Created by wisdom on 2016/11/10.
+  */
+object SeparateByHostname {
+  def main(args: Array[String]) : Unit ={
+    val properties = ItoaPropertyUtil.getProperties()
+    val map = new ConcurrentHashMap[String, AllPredcictTarget] {}
+    val init = new InitUtil(properties, map)
+    val sc = SparkContextUtil.getInstance()
+
+    val files = sc.textFile(init.commonInputPath + "*")
+    val lines = files
+      .map(x => (init.dataFormat(x)))//统一各系统数据的时间戳格式
+      .map(line => (line.split(",")(init.currentBean.getHostNameInfo).split(":")(init.currentBean.getHostNameIndex), line)) //获取主机名信息
+      .filter { case (x, y) => (init.targetMap.contains(init.currentTableName + "_" + x)) } //过滤主机
+      .map { case (k, v) => (k, init.getNeededFields(v, init.currentBean.getFieldList, ",")) } //去除无用字段，只获取neededFields字段
+//      .map { case (k, v) => (k, init.convertToNumeric(v)) }//转换为非数字，谨慎使用，因为会判断每一个字符
+      .map{case (k, v) => (k, init.NaNToNumeric(v)) }//转换为非数字为0
+      .filter{case (k, v) => init.afterPeriod(v)}//获取trainFileStartTime之后的数据，提升效率
+      .reduceByKey{case (x, y) =>
+        x + "\n" + y
+      }
+    lines.foreach { case (filename, content) => OfflineDataProcessing.offlineDataProcessing(init, filename.toUpperCase(), content) }
+    SparkContextUtil.getInstance().stop()
+    System.exit(0)
+  }
+}

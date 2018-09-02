@@ -1,0 +1,20 @@
+log4j.rootLogger=WARN, ServerDailyRollingFile, stdout
+log4j.appender.ServerDailyRollingFile=org.apache.log4j.DailyRollingFileAppender
+log4j.appender.ServerDailyRollingFile.DatePattern='.'yyyy-MM-dd
+log4j.appender.ServerDailyRollingFile.File=./log/itoa.log
+log4j.appender.ServerDailyRollingFile.layout=org.apache.log4j.PatternLayout
+log4j.appender.ServerDailyRollingFile.layout.ConversionPattern=%d{yyy-MM-dd HH:mm:ss.SSS} %p [%l]: %m%n
+log4j.appender.ServerDailyRollingFile.Append=true
+
+log4j.appender.stdout=org.apache.log4j.ConsoleAppender
+log4j.appender.stdout.layout=org.apache.log4j.PatternLayout
+log4j.appender.stdout.layout.ConversionPattern=%d{yyy-MM-dd HH:mm:ss.SSS} %p [%l]: %m%n
+
+log4j.logger.model=info,model,stdout
+log4j.additivity.model = false
+log4j.appender.model=org.apache.log4j.DailyRollingFileAppender
+log4j.appender.model.DatePattern='.'yyyy-MM-dd
+log4j.appender.model.File=./log/modelOut.log
+log4j.appender.model.layout=org.apache.log4j.PatternLayout
+log4j.appender.model.layout.ConversionPattern=%d{yyy-MM-dd HH:mm:ss.SSS} %p [%l]: %m%n
+log4j.appender.model.Append=true

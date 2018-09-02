@@ -1,0 +1,53 @@
+package com.wisdom.spark.streaming.test
+
+import java.text.SimpleDateFormat
+import java.util.{Calendar, Date}
+
+import com.wisdom.spark.common.util.SparkContextUtil
+import org.apache.log4j.Logger
+import org.apache.spark.sql.hive.HiveContext
+
+/**
+  * Created by wisdom on 2017/6/12.
+  */
+object Hivetest {
+
+  val logger = Logger.getLogger(this.getClass)
+
+  def main(args: Array[String]): Unit = {
+    val sc = SparkContextUtil.getInstance()
+    //    新建HiveContext对象
+    val hiveCtx = new HiveContext(sc)
+    UpdateHiveInput(hiveCtx)
+
+  }
+
+  def UpdateHiveInput(hiveContext: HiveContext) : Unit = {
+
+    val time = new Date()
+    val lastoccurtime = getlastmonthtime(time)
+    val simpleDateFormatORG = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.S")
+    val courencetime = simpleDateFormatORG.format(time)
+    val table1 = hiveContext.sql("select concat(substring(opm_min_collection_timestamp,12,4),(case when substring(opm_min_collection_timestamp,16,1) < 5 then '0' else '5' end)) as alarmTime," +
+    " opm_db_host_name,appls_in_db2 from hist_opm.opm_db where length(trim(appls_in_db2)) > 0 and opm_min_collection_timestamp < \' " + courencetime + " \' and opm_min_collection_timestamp >  \'" + lastoccurtime + " \' limit 10 ")
+    //val list = table.map(row => println(row))
+    val table2 = hiveContext.sql("select concat(substring(opm_min_collection_timestamp,12,4),(case when substring(opm_min_collection_timestamp,16,1) < 5 then '0' else '5' end)) as alarmTime," +
+      " opm_db_host_name,appls_in_db2 from hist_opm.opm_db where length(trim(appls_in_db2)) > 0 and opm_min_collection_timestamp < ' " + courencetime + " ' and opm_min_collection_timestamp >  '" + lastoccurtime + " ' limit 10 ")
+    val len1 = table1.collect().toList
+    val len2 = table2.collect().toList
+    len1.map(row => println(row))
+    println("==================================分界线==========================================")
+    len2.map(row => println(row))
+  }
+
+  private def getlastmonthtime(date:Date)  :String = {
+    val simpleformat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.S")
+    val cal = Calendar.getInstance()
+    val time = cal.setTime(date)
+    val lasttime= cal.add(Calendar.MONTH,-1)
+    val finaltime = cal.getTime
+    val st = simpleformat.format(finaltime)
+    st
+  }
+
+}

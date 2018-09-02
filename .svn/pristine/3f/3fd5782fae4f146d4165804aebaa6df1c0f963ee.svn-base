@@ -1,0 +1,54 @@
+package com.wisdom.spark.streaming.test
+
+import java.text.SimpleDateFormat
+import java.util
+
+import com.wisdom.spark.common.ExecutorState
+import com.wisdom.spark.common.bean.PredResult
+import com.wisdom.spark.common.util.{ItoaPropertyUtil, SysConst}
+import com.wisdom.spark.etl.util.RandomNum
+import com.wisdom.spark.streaming.service.PredResultService
+
+/**
+  * Created by htgeng on 2017/6/1.
+  */
+object TestPredList {
+  def main(args: Array[String]) {
+    val props = ItoaPropertyUtil.getProperties()
+    val sdf=new SimpleDateFormat("'1'yyMMddHHmmssSSS")
+    val interval =props.getProperty("spark.streaming.interval.second")
+
+    while(true){
+      Thread.sleep(interval.toLong*1000)
+      var batchList: List[PredResult] = List()
+      for(i<-0 until 4){
+        val predResult=new PredResult
+        val cpuInt=RandomNum.getRangeNum(1,20)
+        val cpuDec=RandomNum.getRangeNum(1,99)
+        val predMax=RandomNum.getRangeNum(10,30)
+        val predMin=RandomNum.getRangeNum(1,10)
+        val predValue=RandomNum.getRangeNum(1,40)
+        predResult.setCurrentActualValue(cpuInt+"."+cpuDec)
+        predResult.setCurrentDataTime((System.currentTimeMillis() / 1000).toString)
+        predResult.setCurrentTime((System.currentTimeMillis() / 1000).toString)
+        predResult.setDataAcceptTime((System.currentTimeMillis() / 1000).toString)
+        predResult.setExecutorState(ExecutorState.success)
+        predResult.setHostName("ASGAAC01")
+        predResult.setIndexTyp("00")
+        predResult.setModelType("PPN")
+        predResult.setNextPredMaxValue(predMax+"")
+        predResult.setNextPredMinValue(predMin+"")
+        predResult.setNextPredValue(predValue+"")
+        predResult.setPredIndexName("IDLE_CPU")
+        predResult.setPredPeriod("0"+i)
+        predResult.setSysName("SYSTEM")
+
+        batchList:+=predResult
+      }
+
+      new PredResultService().testSaveList(batchList)
+    }
+
+  }
+
+}

@@ -1,0 +1,287 @@
+package com.wisdom.spark.streaming.thread
+
+import java.util
+
+import com.wisdom.spark.common.util.{ItoaPropertyUtil, SparkContextUtil, SysConst}
+import com.wisdom.spark.etl.DataProcessing.RealTimeDataProcessingNew
+import com.wisdom.spark.etl.util.InitUtil
+import com.wisdom.spark.streaming.service.PredResultService
+import com.wisdom.spark.streaming.tools.JsonUtil
+import kafka.serializer.StringDecoder
+import org.apache.log4j.Logger
+import org.apache.spark.streaming.kafka.KafkaUtils
+import org.apache.spark.streaming.{Seconds, StreamingContext}
+
+/**
+  * Created by zhengz on 2016/12/12.
+  * 该线程类用于最新版streaming接收kafka消息并解析进行预测的main函数入口，启动main函数监听kafka消息
+  * 具体操作包括：
+  * streaming接收kafka消息转换为RDD;
+  * 将RDD进行简单去重复操作和JSON解析操作;
+  * 遍历RDD进行模型预测和关联分析操作;
+  * 将预测结果和关联分析结果进一步封装调用业务层逻辑批量保存至数据库
+  * 原始数据格式：
+  * {"@hostname":"ASGAAC01","@filename":"unix_memory.xx","@message":"abc,def,ght,…","……","……"，……}
+  */
+object Thread4ITMDataCollect4 extends Serializable {
+  //日志类
+  @transient
+  val logger = Logger.getLogger(this.getClass)
+
+  /**
+    * 1.Kerb认证
+    * 2.创建sparkConf:SparkConf
+    * 3.创建ssc:SparkStreamingContext
+    * 4.创建KafkaParms
+    * 5.收集ITM消息
+    * 6.去重复并解析消息
+    * 7.调用etl接口
+    * 8.返回结果保存MySQLS
+    *
+    * @param args
+    */
+  def main(args: Array[String]) {
+    //获取配置文件
+    val props = ItoaPropertyUtil.getProperties()
+    //创建SparkContext
+    val sparkContext = SparkContextUtil.getInstance()
+    //加载用于预测的模型
+    val modelObj = Thread4InitialModelObj.getModelMap()
+    //打印加载模型的数量
+    println("********* modelObj.size\t" + modelObj.size)
+    //获取配置的APPName
+    val appName = props.getProperty("public.app.name")
+    //获取SparkStreaming的监听时间间隔
+    val streamPeriod = props.getProperty("spark.streaming.interval.second")
+    //获取设置检查点的路径
+    val checkPoints = props.getProperty("spark.streaming.checkpoint")
+    //获取来自于ITM的数据的Topic名称
+    val itmTopics = props.getProperty("kafka.topic.itm")
+    //获取来自于OPM的数据的Topic名称
+    val opmTopics = props.getProperty("kafka.topic.opm")
+    //获取来自于AppTrans的数据的Topic名称
+    val appTransTopics = props.getProperty("kafka.topic.apptrans")
+
+    //获取来自于AppTrans的数据的Topic名称
+    val ncoperfTopics = props.getProperty("kafka.topic.ncoperf")
+
+    //获取kafka配置的broker
+    val brokers = props.getProperty("kafka.common.brokers")
+
+    //设置Spark程序运行时的名字
+    sparkContext.getConf.setAppName(appName)
+    //调用预测接口时所需的参数
+    val initial = new InitUtil(props, modelObj)
+    //设置为广播变量
+    val initialBroadCast = sparkContext.broadcast(initial)
+    //创建StreamingContext
+    val ssc = new StreamingContext(sparkContext, Seconds(streamPeriod.toInt))
+    //设置检查点
+    ssc.checkpoint(checkPoints)
+    //将获取到的Topic配置项，用逗号分隔，转化为Set,便于后面创建KafkaDstream时参数的调用
+    val setItm = itmTopics.split(",").toSet
+    val setOpm = opmTopics.split(",").toSet
+    val setTrans = appTransTopics.split(",").toSet
+    //Kafka Topic to Set
+    val setNco = ncoperfTopics.split(",").toSet
+    //接收到的Kafka JSON数据中，目标键值对的键值
+    val itmFile = props.getProperty("data.itm.key")
+    val itmBody = props.getProperty("data.itm.value")
+    //创建kafkaDStream时所需的kafka配置项
+    val kafkaParams = Map[String, String](props.getProperty("kafka.param.brokers.key") -> brokers) //, props.getProperty("kafka.param.offset.key") -> offset
+    //创建Topic:ITM的KafkaDStream，参见Spark KafkaUtils API
+    val lineItm = KafkaUtils.createDirectStream[String, String, StringDecoder, StringDecoder](ssc, kafkaParams, setItm).map(_._2)
+    //创建Topic:OPM的KafkaDStream，参见Spark KafkaUtils API
+    val lineOpm = KafkaUtils.createDirectStream[String, String, StringDecoder, StringDecoder](ssc, kafkaParams, setOpm).map(_._2)
+    //创建Topic:APPTRANS的KafkaDStream，参见Spark KafkaUtils API
+    val lineTrans = KafkaUtils.createDirectStream[String, String, StringDecoder, StringDecoder](ssc, kafkaParams, setTrans).map(_._2)
+    //创建Kafka-Streaming 返回DStream
+    val lineNco = KafkaUtils.createDirectStream[String, String, StringDecoder, StringDecoder](ssc, kafkaParams, setNco).map(_._2)
+
+    //数据接收时间
+    var dataGetTime = -1L
+    //RDD重分区分区数
+    val partitions = props.getProperty("kafka.data.partitions").toInt
+
+    val resultLineNco = lineNco.transform(trans => {
+      //获取数据接收时间
+      dataGetTime = System.currentTimeMillis() / 1000
+      //去重、重分区
+      trans.distinct().repartition(partitions)
+      //JSON解析成Map(key->value)
+    }).map(JsonUtil.parseJSON(_)).filter(map => {
+      //数据过滤，条件：包含键@filename,@message,且@message有内容
+      if (map.contains(itmFile) && map.contains(itmBody) && !map(itmBody).toString.isEmpty) true else false
+      //获取@message的内容并用\t分隔，转为数组
+    }).map(map => map(itmBody).toString.split("\t")).map(arr => {
+      try {
+        //指标名称拼接
+        val AlertGroup = arr(6)
+        var tableName = "reporter_status0"
+
+        //F5客户端当前连接数
+        if ("ifUtilization".equalsIgnoreCase(AlertGroup)) tableName = "reporter_status3"
+        //F5客户端新增连接数
+        else if ("ClientNewConnections".equalsIgnoreCase(AlertGroup)) tableName = "reporter_status5"
+        //F5服务器当前连接数
+        else if ("ServerCurConnections".equalsIgnoreCase(AlertGroup)) tableName = "reporter_status6"
+        //F5服务器新增连接数
+        else if ("ClientCurConnections".equalsIgnoreCase(AlertGroup)) tableName = "reporter_status4"
+        //思科CPU利用率
+        else if ("CpuUtilization".equalsIgnoreCase(AlertGroup)) tableName = "reporter_status1"
+        //思科内存利用率
+        else if ("MemoryUtilization".equalsIgnoreCase(AlertGroup)) tableName = "reporter_status2"
+
+        else if ("CurConnections".equalsIgnoreCase(AlertGroup)) tableName = "reporter_status7"
+        //F5CPU利用率
+        //        else if (AlertGroup.equals("F5CpuUtilization")) AlertGroup ="Network7"
+        //F5内存利用率
+        //        else if (AlertGroup.equals("F5MemoryUtilization")) AlertGroup ="Network8"
+        //华为（防火墙）当前连接数
+        //        else if (AlertGroup.equals("HuaweiCurConnections")) AlertGroup ="Network9"
+        //H3C（防火墙）当前连接数
+        //        else if (AlertGroup.equals("H3CCurConnections")) AlertGroup ="Network10"
+        //思科（防火墙）当前连接数
+        //        else if (AlertGroup.equals("CiscoCurConnections")) AlertGroup ="Network11"
+        //思科带宽利用率
+        //        else if (AlertGroup.equals("CiscoifUtilization")) AlertGroup ="Network12"
+        //Juniper带宽利用率
+        //        else if (AlertGroup.equals("JuniperifUtilization")) AlertGroup = "Network13"
+        //H3C带宽利用率
+        //        else if (AlertGroup.equals("H3CifUtilization")) AlertGroup = "Network14"
+        //华为带宽利用率
+        //        else if (AlertGroup.equals("HuaweiifUtilization")) AlertGroup = "Network15"
+        //其他
+        else tableName = "reporter_status0"
+        //(时间戳，指标名，主机，值)
+        (tableName, arr(2), arr(4), arr(7))
+      } catch {
+        //数组越界异常处理
+        case e: ArrayIndexOutOfBoundsException => {
+          //打印日志：当前数据
+          logger.warn(arr.toString)
+          //数组越界返回的元组
+          ("reporter_status0", "1494294343", "0.0.0.0", "0")
+        }
+      }
+      //按时间戳排序
+    }).filter(row => row._1 != "reporter_status0")
+      //      .transform(trans => {
+      //      trans.sortBy(row => row._2)
+      //    })
+      .map(values => {
+      //用于保存预测结果的变量
+      val resObject = new util.HashMap[String, Object]
+      //调用实时数据处理接口，返回预测结果
+      val res = RealTimeDataProcessingNew.dataProcessing(initialBroadCast.value,
+        values._1, values._2 + "," + values._3 + "," + values._4, "prediction")
+      //将预测结果保存进resObject
+      resObject.put(SysConst.MAP_DATA_GETTIME_KEY, dataGetTime.toString)
+      //将预测数据接收时间保存进resObject
+      resObject.put(SysConst.MAP_DATA_RESULT_KEY, res)
+      //返回resObject
+      resObject
+    })
+
+    //由于opm和apptrans为1分钟间隔,统一处理未5分钟时间间隔
+    var filterMap: util.HashMap[String, String] = null
+    val lineOPMTRANS = lineOpm.union(lineTrans)
+
+    // ITM OPM APPTRANS数据处理
+    val resultLineOPMTRANS = lineOPMTRANS.transform(trans => {
+      //获取Kafka数据接收时间，时间格式还未定制，暂时默认
+      dataGetTime = System.currentTimeMillis() / 1000
+
+      filterMap = new util.HashMap[String, String]()
+      //去重复，重新分区
+      trans.distinct().repartition(partitions)
+      //JSON解析成Map
+    }).map(JsonUtil.parseJSON(_)).filter(map => {
+      //数据过滤,仅保留数据中包含键 @filename 和 @message 的数据
+      if (map.contains(itmFile) && map.contains(itmBody)) true else false
+      //数据抽取，取@filename和@message的内容，组成元组
+    }).map(map => (map(itmBody).toString, map(itmFile).toString)).transform(trans => {
+      //数据排序
+      trans.sortByKey(true)
+    }).filter { case (message, filename) =>
+      var arr: Array[String] = null
+      var index = 0
+      if (message.contains(",")) {
+        arr = message.split(",")
+        index = 1
+      } else if (message.contains("^")) {
+        arr = message.split("\\^")
+        index = 0
+      }
+      if (arr.length > 1) {
+        if (filterMap.containsKey(arr(index))) {
+          false
+        } else {
+          filterMap.put(arr(index), "")
+          true
+        }
+      } else {
+        false
+      }
+
+    }.map(values => {
+      //用于封装预测结果的变量resObject
+      val resObject = new util.HashMap[String, Object]()
+      //调用预测接口，返回预测结果Map
+      val res = RealTimeDataProcessingNew.dataProcessing(initialBroadCast.value, values._2, values._1, "prediction")
+      //将预测结果和Kafka数据接收时间封装到一起
+      resObject.put(SysConst.MAP_DATA_GETTIME_KEY, dataGetTime.toString)
+      resObject.put(SysConst.MAP_DATA_RESULT_KEY, res)
+      //返回封装好的预测结果
+      resObject
+    })
+
+    // ITM OPM APPTRANS数据处理
+    val resultLineITM = lineItm.transform(trans => {
+      //获取Kafka数据接收时间，时间格式还未定制，暂时默认
+      dataGetTime = System.currentTimeMillis() / 1000
+      //去重复，重新分区
+      trans.distinct().repartition(partitions)
+      //JSON解析成Map
+    }).map(JsonUtil.parseJSON(_)).filter(map => {
+      //数据过滤,仅保留数据中包含键 @filename 和 @message 的数据
+      if (map.contains(itmFile) && map.contains(itmBody)) true else false
+      //数据抽取，取@filename和@message的内容，组成元组
+    }).map(map => (map(itmBody).toString, map(itmFile).toString)).transform(trans => {
+      //数据排序
+      trans.sortByKey(true)
+    }).map(values => {
+      //用于封装预测结果的变量resObject
+      val resObject = new util.HashMap[String, Object]()
+      //调用预测接口，返回预测结果Map
+      val res = RealTimeDataProcessingNew.dataProcessing(initialBroadCast.value, values._2, values._1, "prediction")
+      //将预测结果和Kafka数据接收时间封装到一起
+      resObject.put(SysConst.MAP_DATA_GETTIME_KEY, dataGetTime.toString)
+      resObject.put(SysConst.MAP_DATA_RESULT_KEY, res)
+      //返回封装好的预测结果
+      resObject
+    })
+
+    val finalLine = resultLineNco.union(resultLineOPMTRANS).union(resultLineITM)
+    //** 执行action操作,保存预测结果
+    finalLine.foreachRDD(rdd => {
+      //rdd 转为List的开始时间
+      val t1 = System.currentTimeMillis()
+      //rdd 转为List
+      val list = rdd.collect().toList
+      //rdd 转为List的结束时间
+      val t2 = System.currentTimeMillis()
+      logger.warn("****  当前stream collect 处理耗时 rdd.collect().toList  ===> " + (t2 - t1) + " ms")
+      //保存预测结果到MySql中
+      new PredResultService().dataAcceptAndSaveMysql(list)
+      //预测结果保存结束时间
+      val t3 = System.currentTimeMillis()
+      logger.warn("****  当前stream数据保存处理耗时dataAcceptAndSaveMysql  ===> " + (t3 - t2) + " ms")
+    })
+    //    启动流计算环境StreamingContext
+    ssc.start()
+    //    等待作业完成
+    ssc.awaitTermination()
+  }
+}
+

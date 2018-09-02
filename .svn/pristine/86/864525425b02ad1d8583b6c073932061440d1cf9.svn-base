@@ -1,0 +1,297 @@
+package com.wisdom.spark.streaming.dao
+
+import java.sql.{Connection, PreparedStatement, ResultSet, Timestamp}
+import java.text.SimpleDateFormat
+import java.util.Date
+
+import com.wisdom.spark.common.bean.PredResult
+import com.wisdom.spark.common.util.ItoaPropertyUtil
+import com.wisdom.spark.streaming.bean.{AlarmConfiguration, AlarmResult, AlarmRules}
+import com.wisdom.spark.streaming.tools.ConnUtils
+import org.apache.log4j.Logger
+
+
+/**
+  * Created by wisdom on 2016/12/19.
+  * 告警表dao操作，包括单表数据保存与查询等操作
+  */
+class AlarmDao {
+  val props = ItoaPropertyUtil.getProperties()
+  val logger = Logger.getLogger(this.getClass)
+
+  /**
+    * 1.保存告警规则信息（预留）
+    * 2.保存告警指标配置信息（预留）
+    * 3.保存告警结果表
+    * 4.批量保存告警结果表
+    * 5.查询指标告警配置信息
+    */
+  def saveAalarmRules(alarmRules: AlarmRules, conn: Connection): Unit = {
+    //To do...
+  }
+//删除告警阈值配置信息
+  def delAlarmConf(sysName:String, conn: Connection): Unit = {
+    logger.warn("**** 删除告警阈值配置信息开始 sysName = " + sysName +"****")
+    var pst:PreparedStatement = null
+    val sql ="delete from t_alarm_configuration where sysName = ?"
+    try{
+      pst = conn.prepareStatement(sql)
+      pst.setString(1,sysName)
+      pst.executeUpdate()
+    }catch {
+      case e: Exception => logger.error("SQL Exception!!! PreparStatement executed Failed!!!" + e.printStackTrace())
+    } finally {
+      ConnUtils.closeStatement(null, pst, null)
+    }
+  }
+//告警阈值配置信息保存
+  def saveAlarmConf(alarmConfList: List[AlarmConfiguration], conn: Connection): Unit = {
+    logger.warn("**** 告警阈值配置信息开始保存 alarmConfList.size= "+alarmConfList.size+"****")
+    if (alarmConfList != null && !alarmConfList.isEmpty) {
+      var pst2: PreparedStatement = null
+      val batchNums = props.getProperty("mysql.sql.batch").toInt
+      val sql2 = "INSERT INTO t_alarm_configuration ( sysName, hostName, indexTyp, predIndexName, confDesc, confLowValue, confMidValue, confHighValue, alarmTime,writetime ) VALUES (?,?,?,?,?,?,?,?,?,now())"
+      try {
+        pst2 = conn.prepareStatement(sql2)
+        for (i <- alarmConfList.indices) {
+          pst2.setString(1, alarmConfList(i).getSysName)
+          pst2.setString(2,alarmConfList(i).getHostName )
+          pst2.setString(3, alarmConfList(i).getIndexTyp)
+          pst2.setString(4, alarmConfList(i).getPredIndexName)
+          pst2.setString(5, alarmConfList(i).getConfDesc)
+          pst2.setString(6, alarmConfList(i).getConfLowValue)
+          pst2.setString(7, alarmConfList(i).getConfMidValue)
+          pst2.setString(8,alarmConfList(i).getConfHighValue )
+          pst2.setString(9, alarmConfList(i).getAlarmTime)
+          pst2.addBatch()
+          if ( i !=0 && i % batchNums == 0) {
+            pst2.executeBatch()
+            pst2.clearBatch()
+            logger.warn("**** 告警阈值配置信息保存进度 ===> " + i + " 条完成")
+          }
+        }
+        pst2.executeBatch()
+        logger.warn("**** 告警阈值配置信息全部保存完成 ===> " + alarmConfList.size + " 条记录")
+      } catch {
+        case e: Exception => logger.error("SQL Exception!!! PreparStatement executed Failed!!!" + e.printStackTrace())
+      } finally {
+        ConnUtils.closeStatement(null, pst2, null)
+      }
+    }
+  }
+
+  //更新指标规则配置关系表
+  def updateRCrel(conn: Connection): Unit ={
+    var pst1: PreparedStatement = null
+    var pst2: PreparedStatement = null
+    val batchNums = props.getProperty("mysql.sql.batch").toInt
+    val sql1 ="delete from t_alarm_rules_conf_rel "
+    val sql2 = "INSERT INTO t_alarm_rules_conf_rel ( ruleId,confId ) select ?,confId from t_alarm_configuration"
+    try {
+      pst1 = conn.prepareStatement(sql1)
+      pst2 = conn.prepareStatement(sql2)
+      pst1.executeUpdate()
+      for (i <- 1 to 8) {
+        pst2.setInt(1,i)
+        pst2.executeUpdate()
+        }
+      }catch {
+      case e: Exception => logger.error("SQL Exception!!! PreparStatement executed Failed!!!" + e.printStackTrace())
+    } finally {
+      ConnUtils.closeStatement(pst1, pst2, null)
+    }
+  }
+
+  /**
+    * 告警结果保存至数据库(no use)
+    *
+    * @param alarmResult 告警结果
+    * @param conn        数据库连接
+    */
+  def saveAlarmResult(alarmResult: AlarmResult, conn: Connection): Unit = {
+    if (alarmResult != null) {
+      var pst: PreparedStatement = null
+      val sql = "INSERT INTO t_alarm_result ( resultTyp, writeTime, hostName, alarmTime, alarmInfo, indexName, predPeriod, confId, ruleId, preCol1, preCol2 ) VALUES (?,?,?,?,?,?,?,?,?,?,?)"
+      try {
+        pst = conn.prepareStatement(sql)
+        pst.setString(1, alarmResult.getResultTyp)
+        pst.setTimestamp(2, new Timestamp(new Date().getTime))
+        pst.setString(3, alarmResult.getHostName)
+        pst.setString(4, alarmResult.getAlarmTime)
+        pst.setString(5, alarmResult.getAlarmInfo)
+        pst.setString(6, alarmResult.getIndexName)
+        pst.setString(7, alarmResult.getPredPeriod)
+        pst.setInt(8, alarmResult.getConfId)
+        pst.setInt(9, alarmResult.getRuleId)
+        pst.setString(10, alarmResult.getPreCol1)
+        pst.setString(11, alarmResult.getPreCol2)
+        pst.executeUpdate()
+        logger.info("**** 单挑告警信息保存完成 ===> " + alarmResult.toString)
+      } catch {
+        case e: Exception => logger.error("SQL Exception!!! PreparStatement executed Failed!!!" + e.printStackTrace())
+      } finally {
+        ConnUtils.closeStatement(pst, null, null)
+      }
+    }
+  }
+
+  /**
+    * 批量保存告警结果数据至数据库
+    *
+    * @param list 告警结果list集合
+    * @param conn 数据库连接
+    */
+  def saveAlarmResultList(list: List[AlarmResult], conn: Connection): Unit = {
+    if (list != null && list.size != 0) {
+      var pst: PreparedStatement = null
+      val sql = "INSERT INTO t_alarm_result ( resultTyp, writeTime, hostName, alarmTime, alarmInfo, indexName, predPeriod, confId, ruleId, preCol1, preCol2 ) VALUES (?,?,?,?,?,?,?,?,?,?,?)"
+      try {
+        pst = conn.prepareStatement(sql)
+        for (i <- 0 until list.size) {
+          pst.setString(1, list(i).getResultTyp)
+          pst.setTimestamp(2, new Timestamp(new Date().getTime))
+          pst.setString(3, list(i).getHostName)
+          pst.setString(4, list(i).getAlarmTime)
+          pst.setString(5, list(i).getAlarmInfo)
+          pst.setString(6, list(i).getIndexName)
+          pst.setString(7, list(i).getPredPeriod)
+          pst.setInt(8, 0)
+          pst.setInt(9, 0)
+          pst.setString(10, list(i).getPreCol1)
+          pst.setString(11, list(i).getPreCol2)
+          pst.addBatch()
+        }
+        pst.executeBatch()
+        logger.info("**** 告警结果全部保存完成 ===> " + list.size + " 条记录")
+      } catch {
+        case e: Exception => logger.error("SQL Exception!!! PreparStatement executed Failed!!!" + e.printStackTrace())
+      } finally {
+        ConnUtils.closeStatement(pst, null, null)
+      }
+    }
+  }
+
+  /**
+    * 查看指标告警相关配置信息
+    *
+    * @param res  预测结果
+    * @param conn 数据库连接
+    * @return
+    */
+  def findIndexAlarmConf(res: PredResult, conn: Connection): List[Map[String, String]] = {
+    //查询告警规则的SQL语句
+    val sql = "SELECT t1.confId, t1.sysName, t1.hostName, t1.indexTyp, t1.predIndexName, t1.confDesc, t1.confLowValue, t1.confMidValue, t1.confHighValue, t2.ruleId, t3.ruleName, t3.rule, t3.alarmLevel, t4.predIndexCName FROM t_alarm_configuration AS t1 LEFT JOIN t_alarm_rules_conf_rel AS t2 ON t1.confId = t2.confId LEFT JOIN t_alarm_rules AS t3 ON t2.ruleId = t3.ruleId LEFT JOIN t_pre_index t4 ON t1.predIndexName = t4.predIndexEName WHERE t1.hostName = ? AND t1.predIndexName = ? AND t1.alarmTime = ? ORDER BY t3.alarmLevel"
+    //用于承载查询结果转化成的List
+    var list = List[Map[String, String]]()
+    var pst: PreparedStatement = null
+    var rs: ResultSet = null
+    val sdf = new SimpleDateFormat("HH:mm")
+    var alarmTime = "00:00"
+    if (res.getSysName.contains("REPORTER_STATUS") ) alarmTime = sdf.format(res.getCurrentDataTime.toLong * 1000L) else alarmTime = "00:00"
+    try {
+      pst = conn.prepareStatement(sql)
+      pst.setString(1, res.getHostName)//预测主机名
+      pst.setString(2, res.getPredIndexName)//预测指标名
+      pst.setString(3,alarmTime)//预测时刻
+
+      //执行查询
+      rs = pst.executeQuery()
+      //解析Mysql查询结果,转化为List
+      list = analysisResultSetOfConf(rs)
+    }
+    catch {
+      case e: Exception => logger.error("SQL Exception!!! PreparStatement executed Failed!!!" + e.printStackTrace())
+    } finally {
+      //关闭数据库连接
+      ConnUtils.closeStatement(pst, null, rs)
+    }
+    list
+  }
+
+  /**
+    * 解析Mysql查询结果——RS结果集，转存为List(Map(String,String))
+    *
+    * @param rs 结果集
+    * @return
+    */
+  def analysisResultSetOfConf(rs: ResultSet): List[Map[String, String]] = {
+    var list = List[Map[String, String]]()
+    if (rs != null) {
+      while (rs.next()) {
+        //t1.confId, t1.sysName, t1.hostName, t1.indexTyp, t1.predIndexName, t1.confDesc, t1.confLowValue, t1.confMidValue, t1.confHighValue, t2.ruleId, t2.confId, t3.ruleName, t3.rule, t3.alarmLevel
+        var map = Map[String, String]()
+        map += ("confId" -> rs.getString(1))
+        map += ("sysName" -> rs.getString(2))
+        map += ("hostName" -> rs.getString(3))
+        map += ("indexTyp" -> rs.getString(4))
+        map += ("predIndexName" -> rs.getString(5))
+        map += ("confDesc" -> rs.getString(6))
+        map += ("confLowValue" -> rs.getString(7))
+        map += ("confMidValue" -> rs.getString(8))
+        map += ("confHighValue" -> rs.getString(9))
+        map += ("ruleId" -> rs.getString(10))
+        map += ("ruleName" -> rs.getString(11))
+        map += ("rule" -> rs.getString(12))
+        map += ("alarmLevel" -> rs.getString(13))
+        map += ("predIndexCName" -> rs.getString(14))
+        list = list :+ map
+      }
+    }
+    list
+  }
+
+  /**
+    * 查找当前指标前几个时刻的预测值
+    *
+    * @param res  预测结果
+    * @param conn 数据库连接
+    * @return
+    */
+  def findLatelyPredResult(res: PredResult, conn: Connection): List[String] = {
+    val sql = "SELECT t1.currentActualValue FROM t_pred_result AS t1 WHERE t1.hostName = ? AND t1.predIndexName = ? AND t1.predPeriod = ? AND t1.currentDataTime <= ? AND t1.currentDataTime >= ?- 3600 ORDER BY t1.currentDataTime DESC LIMIT 0, 5"
+    var list: List[String] = List[String]()
+    var pst: PreparedStatement = null
+    var rs: ResultSet = null
+    try {
+      pst = conn.prepareStatement(sql)
+      pst.setString(1, res.getHostName)
+      pst.setString(2, res.getPredIndexName)
+      pst.setString(3, res.getPredPeriod)
+      pst.setString(4, res.getCurrentDataTime)
+      pst.setString(5, res.getCurrentDataTime)
+      rs = pst.executeQuery()
+      while (rs.next()) {
+//        list.:+(rs.getString(1))
+        list=list.::(rs.getString(1))
+      }
+    } catch {
+      case e: Exception => logger.error("SQL Exception!!! PreparStatement executed Failed!!!" + e.printStackTrace())
+    } finally {
+      ConnUtils.closeStatement(pst, null, rs)
+    }
+    list.reverse
+  }
+
+  /**
+    * 查询告警结果信息表数据
+    *
+    * @param alarmResult 告警结果查询信息
+    * @return 告警结果详细信息
+    */
+  @deprecated
+  def findAlarmResult(alarmResult: AlarmResult, conn: Connection): AlarmResult = {
+    val sql = ""
+    var pst: PreparedStatement = null
+    var rs: ResultSet = null
+    try {
+      pst = conn.prepareStatement(sql)
+
+    } catch {
+      case e: Exception => logger.error("SQL Exception!!! PreparStatement executed Failed!!!" + e.printStackTrace())
+    } finally {
+      ConnUtils.closeStatement(pst, null, rs)
+    }
+    null
+  }
+
+}

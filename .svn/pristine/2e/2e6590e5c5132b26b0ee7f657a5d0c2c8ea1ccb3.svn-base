@@ -1,0 +1,76 @@
+package com.wisdom.spark.streaming.thread
+
+import java.util
+import java.util.concurrent.{ConcurrentHashMap, ConcurrentMap, Executors}
+
+import com.wisdom.spark.common.util.ItoaPropertyUtil
+import com.wisdom.spark.ml.tgtVar.AllPredcictTarget
+import com.wisdom.spark.streaming.bean.ModelObject
+import com.wisdom.spark.streaming.service.ModelObjService
+import org.apache.calcite.plan.RelOptPlanner.Executor
+import com.wisdom.spark.streaming.tools.ModelInstantiationThread
+import org.apache.log4j.Logger
+
+import scala.collection.mutable.HashMap
+
+/**
+  * Created by zhengz on 2017/1/19.
+  */
+object Thread4InitialModelObj extends Serializable {
+  val logger = Logger.getLogger(this.getClass)
+
+  //系统第一次部署，初始化模型列表到数据库
+  def main(args: Array[String]) {
+    val modelObjService = new ModelObjService
+    logger.info("----------- Initial Model Object ------------")
+    modelObjService.initialModelObj()
+    logger.info("----------- END ------------")
+  }
+
+  /**
+    * (指标_预测周期_节点,AllPredcictTarget对象)
+    * 指标_预测周期_节点: 例如IDEL_CPU_5_ASCECUP01
+    */
+
+  val tgtModelMap = new ConcurrentHashMap[String, AllPredcictTarget]
+  //  synchronized(tgtModelMap)
+  var objNums: Integer = 0
+
+
+  /**
+    * 初始化模型对象，加入map缓存中
+    *
+    * @return
+    */
+  private def tgtModelMapFromDB(): Unit = {
+    val props = ItoaPropertyUtil.getProperties()
+    val maxThreadNums = props.getProperty("spark.driver.thread.max").toInt
+    val modelObjService = new ModelObjService
+    val listModelObj: util.List[ModelObject] = modelObjService.findModelObj()
+    objNums = listModelObj.size()
+    val pools = Executors.newFixedThreadPool(maxThreadNums) //创建线程池
+
+    for (i <- 0 until listModelObj.size()) {
+      val modelObj = listModelObj.get(i)
+      pools.execute(new ModelInstantiationThread(modelObj.getModelObjKey, modelObj.getPredIndexName + "_" + modelObj.getPredPeriod, modelObj.getHostName))
+    }
+  }
+
+  //程序每次启动时，预加载模型缓存早内存中
+  def getModelMap(): ConcurrentHashMap[String, AllPredcictTarget] = {
+    val time1 = System.currentTimeMillis()
+    tgtModelMapFromDB()
+
+    while (tgtModelMap.size() != objNums) {
+      logger.warn("**** tgtModelMap.size:" + tgtModelMap.size + " == objNums:" + objNums + " ??  ****")
+      logger.warn("**** Waiting for model objects instantiated1111... ****")
+      Thread.sleep(10000)
+    }
+    logger.warn("**** tgtModelMap.size:" + tgtModelMap.size + " == objNums:" + objNums + " !!  ****")
+
+    val time2 = System.currentTimeMillis()
+    logger.warn("------------------ All Model objects instantiated cost：" + (time2 - time1) + "ms")
+    tgtModelMap
+  }
+}
+

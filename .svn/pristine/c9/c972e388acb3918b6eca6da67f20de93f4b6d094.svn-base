@@ -1,0 +1,106 @@
+package com.wisdom.spark.streaming.bean
+
+import java.sql.Timestamp
+
+import scala.beans.BeanProperty
+
+/**
+  * Created by wisdom on 2016/12/19.
+  *
+  * 告警规则信息，字段对应表名：t_alarm_rules
+  */
+class AlarmRules {
+  @BeanProperty
+  var ruleId: Integer = null
+  @BeanProperty
+  var ruleName: Integer = null
+  @BeanProperty
+  var rule: String = ""
+  @BeanProperty
+  var alarmLevel: String = ""
+  @BeanProperty
+  var writeTime: Timestamp = null
+}
+
+/**
+  * 告警配置信息表，字段对应表名：t_alarm_configuration
+  */
+class AlarmConfiguration {
+  @BeanProperty
+  var confId: Integer = null
+  @BeanProperty
+  var sysName: String = ""
+  @BeanProperty
+  var hostName: String = ""
+  @BeanProperty
+  var indexTyp: String = ""
+  @BeanProperty
+  var predIndexName: String = ""
+  @BeanProperty
+  var confDesc: String = ""
+  @BeanProperty
+  var confLowValue: String = ""
+  @BeanProperty
+  var confMidValue: String = ""
+  @BeanProperty
+  var confHighValue: String = ""
+  @BeanProperty
+  var writeTime: Timestamp = null
+  @BeanProperty
+  var alarmTime: String = ""
+
+}
+
+/**
+  * 告警结果表，字段对应表名：t_alarm_result
+  *
+  * 整合DB2异常、GC异常、指标异常、预测告警多方面告警信息
+  */
+class AlarmResult(info: String) {
+
+  @BeanProperty
+  var resultId: Integer = null
+  //告警结果编号，主键自增长
+  @BeanProperty
+  var resultTyp: String = ""
+  //告警类型，枚举如下：predict,db2Exception,gcException,indexExection
+  @BeanProperty
+  var writeTime: Timestamp = null
+  //告警结果记录写入时间
+  @BeanProperty
+  var hostName: String = ""
+  //告警主机名/设备名
+  @BeanProperty
+  var alarmTime: String = ""
+  //原始数据中的时间，不同的告警类型对应不同格式的告警具体时刻
+  @BeanProperty
+  var alarmInfo: String = info
+  //告警详细信息，包括dbdiag的低频词组信息和gclog信息，封装json字符串
+  @BeanProperty
+  var indexName: String = ""
+  //指标名称，预测/异常指标名称
+  @BeanProperty
+  var predPeriod: String = ""
+  //预测指标周期
+  @BeanProperty
+  var confId: Integer = null
+  //预测告警配置ID
+  @BeanProperty
+  var ruleId: Integer = null
+  //预测告警规则ID
+  @BeanProperty
+  var preCol1: String = ""
+  //备用
+  @BeanProperty
+  var preCol2: String = ""
+  //备用
+
+
+  //默认无参构造函数
+  def this() = {
+    this("")
+  }
+
+
+  override def toString = s"AlarmResult(resultId=$resultId, resultTyp=$resultTyp, writeTime=$writeTime, hostName=$hostName, alarmTime=$alarmTime, alarmInfo=$alarmInfo, indexName=$indexName, predPeriod=$predPeriod, confId=$confId, ruleId=$ruleId, preCol1=$preCol1, preCol2=$preCol2)"
+}

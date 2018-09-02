@@ -1,0 +1,95 @@
+#***********************  public parameters...  ***********************#
+public.sys.encoding=utf-8
+public.app.name=ITOA_ONLINE_DATA_ANALYSIS
+public.hadoop.zookeepers=182.251.35.91:24002,182.251.35.92:24002,182.251.35.93:24002
+public.hadoop.userPrincipal=wsd_streaming
+public.hadoop.userKeytabPath=etc/wsd_streaming/wsd_streaming.keytab
+public.hadoop.krb5ConfPath=etc/wsd_streaming/krb5.conf
+
+#***********************  Kafka parameters...  ***********************#
+kafka.common.brokers=182.251.35.94:21005,182.251.35.95:21005,182.251.35.99:21005,182.251.35.100:21005
+kafka.data.partitions=30
+kafka.topic.default=test
+kafka.param.brokers.key=metadata.broker.list
+kafka.param.offset.key=auto.offset.reset
+kafka.param.offset.value=smallest
+
+#***********************  Kafka ITM parameters  ***********************#
+kafka.topic.itm.topic=PRD_ITM,PRD_OPM
+data.itm.key=@filename
+data.itm.value=@message
+data.itm.filename=System_000001.csv
+data.itm.file.dir=data/itm/
+data.itm.file.namespace=ITM
+#***********************  db2diag parameters ***********************#
+db2.streaming.interval.second=100
+db2.streaming.checkpoint=db2diag-checkpoint
+kafka.topic.db2diag=PRD_DB2DIAG
+data.db2.key=@hostname
+data.db2.value=@message
+data.db2.threshold=10
+data.db2.hostname=DBCECUP01,DBGAAC
+
+#***********************  Spark parameters  ***********************#
+spark.streaming.interval.second=300
+spark.streaming.checkpoint=data-checkpoint
+spark.driver.thread.max=30
+
+#***********************  File dir config  ***********************#
+file.data.dir=D:\\Workspace\\P2016073\\zhengzheng\\DataExample\\20161201Memory
+file.data.fullpath=D:\\Workspace\\P2016073\\zhengzheng\\DataExample\\20161201Memory\\import_part_1478865320414_2488_0000000
+file.delimiter=\\r\\n
+alarm.result.dir=data/
+alarm.result.file.prefix=itoa_alarm_
+
+#***********************  MySQL parameters  ***********************#
+mysql.db.user=wsd
+mysql.db.pwd=wsd
+mysql.db.driver=com.mysql.jdbc.Driver
+mysql.db.url=jdbc:mysql://localhost:3306/wsd?Unicode=true&characterEncoding=utf8
+mysql.sql.batch=20
+mysql.pool.max=100
+mysql.pool.nums=90
+
+#***********************  Alarm Result Conf  ***********************#
+alarm.result.tolerance=50
+
+#***********************  Model CONFIG  ***********************#
+ETL_SQL=select * from t_table_host_index
+model.init.sql=select * from t_index_alarm_type where flag='01' and model_typ in('PPN','WINSTATS')
+
+#************************ GAAC CONFIG*********************#
+kafka.stream.interval=60
+kafka.topic.itm=PRD_ITM
+kafka.topic.opm=PRD_OPM
+kafka.topic.apptrans=PRD_APPTRANS
+kafka.topic.ncoperf=PRD_NCOPERF
+
+df_tab_cfg_name=t_host_conf_info
+df_tab_file_ecupin=ecupin
+df_tab_file_ecupout=ecupout
+df_tab_file_gaac=gaac
+df_tab_file_mobs=mobs
+df_tab_file_pbank=pbank
+df_tab_file_opmdb=ompdb
+df_tab_file_system=system
+df_tab_file_unixmemory=unixmemory
+df_tab_file_threadpools=threadpools
+df_tab_file_dbconnectionpools=dbconnectionpools
+df_tab_file_applicationserver=applicationserver
+df_tab_file_queuedata=queuedata
+
+#***********************  Test config  ***********************#
+unit.test.thread.interval=10000
+unit.test.thread.nums=5000
+
+#*********************** GC Streaming  ***********************#
+gc.streaming.interval.second =300
+gc.streaming.checkpoint=gc-checkpoint
+gc.streaming.textFileStream=/user/hive/gcmodel/
+gc.streaming.normalPercent=0.8
+
+
+
+
+

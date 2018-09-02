@@ -1,0 +1,158 @@
+package com.wisdom.spark.streaming.network
+
+
+import java.util
+
+import com.wisdom.spark.common.util.{ItoaPropertyUtil, SparkContextUtil, SysConst}
+import com.wisdom.spark.etl.util.InitUtil
+import org.apache.spark.streaming.{Seconds, StreamingContext}
+import com.wisdom.spark.etl.DataProcessing.RealTimeDataProcessingNew
+import com.wisdom.spark.streaming.thread.Thread4InitialModelObj
+
+import com.wisdom.spark.streaming.service.PredResultService
+import com.wisdom.spark.streaming.tools.JsonUtil
+import kafka.serializer.StringDecoder
+import org.apache.log4j.Logger
+import org.apache.spark.streaming.kafka.KafkaUtils
+
+/**
+  * Created by wisdom on 2017/2/15.
+  *
+  * 网络性能指标实时预测功能
+  * 实时接收kafka数据，Topic：PRD_NCOPERF
+  * 数据为JSON格式： {"hostname":"ASGAAC01","@filename":"output.2017-03-21-4-10","@message":"UPDATE:\t12345\t12345\t123"...}
+  * "@message"的内容为目标数据，以\t形式分隔
+  */
+object networkStreaming {
+  @transient
+  //用于写日志的实例
+  val logger = Logger.getLogger(this.getClass)
+  def main(args: Array[String]) {
+
+    //公共方法：获取SparkContext
+    val sc = SparkContextUtil.getInstance()
+    //获取配置文件
+    val props = ItoaPropertyUtil.getProperties()
+    //模型加载
+    val map = Thread4InitialModelObj.getModelMap()
+    //实时数据处理接口（RealTimeDataProcessingNew.dataProcessing）之参数一
+    val init = new InitUtil(props, map)
+    //广播变量：init
+    val initialBroadCast = sc.broadcast(init)
+    //获取SparkStreaming的监听时间间隔
+    val streamPeriod = props.getProperty("ncoperf.streaming.interval.second")
+    //Spark方法：StreamingContext（sc,时间（秒））
+    val ssc = new StreamingContext(sc, Seconds(streamPeriod.toLong))
+    //获取设置检查点的路径
+    val checkPoints = props.getProperty("ncoperf.streaming.checkpoint")
+    //设置检查点
+    ssc.checkpoint(checkPoints)
+    //kafka的broker列表
+    val brokers = props.getProperty("kafka.common.brokers")
+    //Kafka 配置参数
+    // Requires "metadata.broker.list" or "bootstrap.servers" to be set with Kafka broker(s) (NOT zookeeper servers),
+    // specified in host1:port1,host2:port2 form.
+    val kafkaParams = Map[String, String](props.getProperty("kafka.param.brokers.key") -> brokers)
+    //Kafka Topic
+    val ncoperfTopics = props.getProperty("kafka.topic.ncoperf")
+    //Kafka Topic to Set
+    val setNco = ncoperfTopics.split(",").toSet
+    //创建Kafka-Streaming 返回DStream
+    val lineNco = KafkaUtils.createDirectStream[String, String, StringDecoder, StringDecoder](ssc, kafkaParams, setNco).map(_._2)
+    //获取到的数据中，目标数据的键名
+    val ncoFile = props.getProperty("data.nco.key")
+    //获取到的数据中，目标数据的键名
+    val ncoMessage = props.getProperty("data.nco.value")
+    //重分区的分区数量
+    val partitions = props.getProperty("kafka.data.partitions").toInt
+    // 预测结果保存中所需字段：数据接收时间
+    var dataGetTime = -1L
+    // 数据去重、重分区、排序
+    val finalLineNco = lineNco.transform(trans => {
+      //获取数据接收时间
+      dataGetTime = System.currentTimeMillis() / 1000
+      //去重、重分区
+      trans.distinct().repartition(partitions)
+      //JSON解析成Map(key->value)
+    }).map(JsonUtil.parseJSON(_)).filter(map => {
+      //数据过滤，条件：包含键@filename,@message,且@message有内容
+      if (map.contains(ncoFile) && map.contains(ncoMessage) && !map(ncoMessage).toString.isEmpty) true else false
+      //获取@message的内容并用\t分隔，转为数组
+    }).map(map =>map(ncoMessage).toString.split("\t")).map(arr =>{
+      try {
+        //指标名称拼接
+        var AlertGroup =  arr(6)
+        //F5客户端当前连接数
+        if (AlertGroup.equals("ClientCurConnections")) AlertGroup ="reporter_status4"
+        //F5客户端新增连接数
+        else if (AlertGroup.equals("ClientNewConnections")) AlertGroup ="reporter_status5"
+        //F5服务器当前连接数
+        else if (AlertGroup.equals("ServerCurConnections")) AlertGroup ="reporter_status6"
+        //F5服务器新增连接数
+//        else if (AlertGroup.equals("F5ServerNewConnections")) AlertGroup ="Network4"
+        //思科CPU利用率
+        else if (AlertGroup.equals("CpuUtilization")) AlertGroup ="reporter_status1"
+        //思科内存利用率
+        else if (AlertGroup.equals("MemoryUtilization")) AlertGroup ="reporter_status2"
+        //F5CPU利用率
+//        else if (AlertGroup.equals("F5CpuUtilization")) AlertGroup ="Network7"
+        //F5内存利用率
+//        else if (AlertGroup.equals("F5MemoryUtilization")) AlertGroup ="Network8"
+        //华为（防火墙）当前连接数
+//        else if (AlertGroup.equals("HuaweiCurConnections")) AlertGroup ="Network9"
+        //H3C（防火墙）当前连接数
+//        else if (AlertGroup.equals("H3CCurConnections")) AlertGroup ="Network10"
+        //思科（防火墙）当前连接数
+//        else if (AlertGroup.equals("CiscoCurConnections")) AlertGroup ="Network11"
+        //思科带宽利用率
+//        else if (AlertGroup.equals("CiscoifUtilization")) AlertGroup ="Network12"
+        //Juniper带宽利用率
+//        else if (AlertGroup.equals("JuniperifUtilization")) AlertGroup = "Network13"
+        //H3C带宽利用率
+//        else if (AlertGroup.equals("H3CifUtilization")) AlertGroup = "Network14"
+        //华为带宽利用率
+//        else if (AlertGroup.equals("HuaweiifUtilization")) AlertGroup = "Network15"
+        //其他
+        else if (AlertGroup.equals("ifUtilization")) AlertGroup = "reporter_status3"
+        else AlertGroup ="reporter_status0"
+        //(时间戳，指标名，主机，值)
+        (arr(2),AlertGroup,arr(4),arr(7))
+      }catch {
+        //数组越界异常处理
+        case e:ArrayIndexOutOfBoundsException=>{
+          //打印日志：当前数据
+          logger.warn(arr.toString)
+          //数组越界返回的元组
+          ("N/A","reporter_status0","N/A","N/A")
+        }
+      }
+      //按时间戳排序
+    }).filter( row => row._2 != "reporter_status0").transform(trans => { trans.sortBy(row=>row._1) }).map(values => {
+      //用于保存预测结果的变量
+      val resObject = new util.HashMap[String, Object]
+      //调用实时数据处理接口，返回预测结果
+      val res = RealTimeDataProcessingNew.dataProcessing(initialBroadCast.value,
+        values._2, values._1 + "," + values._3 + "," + values._4, "prediction")
+      //将预测结果保存进resObject
+      resObject.put(SysConst.MAP_DATA_GETTIME_KEY, dataGetTime.toString)
+      //将预测数据接收时间保存进resObject
+      resObject.put(SysConst.MAP_DATA_RESULT_KEY, res)
+      //返回resObject
+      resObject
+    })
+    //DStream保存
+    finalLineNco.foreachRDD(rdd => {
+      //rdd->Array->List
+      val res_list = rdd.collect().toList
+      logger.warn("预测结果" + res_list + "保存进MySQL")
+      //预测结果保存进MySQL
+      new PredResultService().dataAcceptAndSaveMysql(res_list)
+    })
+//    finalLineNco.print()
+    //    启动流计算环境StreamingContext并等待它“完成”
+    ssc.start()
+    //    等待作业完成
+    ssc.awaitTermination()
+
+  }
+}

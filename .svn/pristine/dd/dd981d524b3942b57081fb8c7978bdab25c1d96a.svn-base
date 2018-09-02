@@ -1,0 +1,50 @@
+#只用于windows
+sparkMaster=local[3]
+#重分区分片数
+readCsv.repartitions=4
+#模型训练中产生的部分参数
+modelPropPath=conf/ml_model.properties
+#log4j日志配置路径
+mlLogProps=conf/ml_log4j.properties
+#模型及中间数据存储跟路径
+mlRootPath=/user/wsd/ml_test
+mlIndexNameRegex=\\w*_0$|\\w*_1$|\\w*_2$|\\w*_3$
+mlTrainWeeks=2
+mlWindow=3
+
+#指标区间范围
+ml.tgts=IDLE_CPU,ECUPIN_AVG_TRANS_TIME,CPUUTILIZATION
+ml.bound_map.IDLE_CPU=0,100
+ml.bound_map.ECUPIN_AVG_TRANS_TIME=0,1E10
+ml.bound_map.CPUUTILIZATION=0,1E10
+
+ml.winstats.tgts=IDLE_CPU,ECUPIN_AVG_TRANS_TIME,CPUUTILIZATION
+ml.winstats.freq.5min=IDLE_CPU,ECUPIN_AVG_TRANS_TIME,CPUUTILIZATION
+
+#预测周期指标
+ml.interval=0,1,2,3
+
+ml.db2diag.timeRegx=\\d{4}-\\d{2}-\\d{2}-\\d{2}\\.\\d{2}\\.\\d{2}\\.\\d{6}.*LEVEL
+ml.db2diag.splitRegx=[ |,|:]
+ml.db2diag.removeRegx=S\\d{7}\\.LOG,0x.*,\\d+,#\\d+,-+
+ml.db2diag.removeWords=data,DATA,DB2,UDB,#,",(,),=,/,+
+
+ml.whitelist.IDLE_CPU=(idle|user)_cpu_c(0)
+
+ml.model_type.PPN=PPN
+ml.model_type.WINSTATS=WINSTATS
+ml.model_type.TFIDF=TFIDF
+
+ml.model.index.IDLE_CPU=select * from system where hostname='HOSTNAME:KUX'
+ml.model.index.CPUUTILIZATION=select * from reporter_status where hostname='HOSTNAME' and indexname='INDEXNAME'
+
+
+#*********************** Hive Data  ***********************#
+ml.hive.data.trans.ecupin=select dtimestamp as time,avg_trans_time as value,metric_value as hostname from hist_apptrans.ecupin where dtimestamp >'STARTTIME' and dtimestamp<'ENDTIME'
+ml.hive.data.trans.ecupout=select dtimestamp as time,avg_trans_time as value,metric_value as hostname from hist_apptrans.ecupout where dtimestamp >'STARTTIME' and dtimestamp<'ENDTIME'
+ml.hive.data.trans.gaac=select dtimestamp as time,avg_trans_time as value,metric_value as hostname from hist_apptrans.gaac where dtimestamp >'STARTTIME' and dtimestamp<'ENDTIME'
+ml.hive.data.trans.mobs=select dtimestamp as time,avg_trans_time as value,metric_value as hostname from hist_apptrans.mobs where dtimestamp >'STARTTIME' and dtimestamp<'ENDTIME'
+ml.hive.data.system=select dtimestamp as time,idle_cpu as value,system_name as hostname   from hist_itm.system where dtimestamp >'STARTTIME' and dtimestamp < 'ENDTIME'
+ml.hive.data.unix_memory1=select dtimestamp as time,avail_real_mem_pct as value,system_name as hostname   from hist_itm.unix_memory where dtimestamp >'STARTTIME' and dtimestamp < 'ENDTIME'
+ml.hive.data.unix_memory1=select dtimestamp as time,avail_swap_space_pct as value,system_name as hostname   from hist_itm.unix_memory where dtimestamp >'STARTTIME' and dtimestamp < 'ENDTIME'
+ml.hive.data.reporter_status=select from_unixtime(lastoccurrence) as time,mibvalue as value,node as hostname,alertgroup as indexname from ncoperf.reporter_status where from_unixtime(lastoccurrence) >'STARTTIME' and from_unixtime(lastoccurrence) < 'ENDTIME'

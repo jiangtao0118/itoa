@@ -1,0 +1,114 @@
+package com.wisdom.spark.ml.tgtVar
+
+import java.text.{DateFormat, SimpleDateFormat}
+import java.util.Calendar
+
+import com.wisdom.spark.ml.mlUtil.{ContextUtil, HDFSFileUtil, MLPathUtil}
+
+import scala.collection.mutable
+
+/**
+  * Created by tup on 2017/4/25.
+  */
+class StatsPredictor (tgt: String,
+                      hostnode: String) extends Serializable with PredictTrait{
+
+  val tgt_ind = tgt.substring(0, tgt.lastIndexOf("_"))
+  val tgt_int = tgt.substring(tgt.lastIndexOf("_") + 1)
+  val intervals = ContextUtil.INTERVAL.split(",")
+  val winstatsFreq5min=ContextUtil.winstatsFreq5min
+
+  val delta: Int = {
+    var tmp=0
+    if(tgt_int==intervals(0)){
+      tmp=5
+    }
+    else if(tgt_int==intervals(1)){
+      tmp=15
+    }
+    else if(tgt_int==intervals(2)){
+      tmp=30
+    }
+    else if(tgt_int==intervals(3)){
+      tmp=60
+    }
+    tmp
+  }
+
+  val modelPath = MLPathUtil.statsModelPath(tgt, hostnode)
+  val model = getModelMap()
+
+  def predict(data: Array[Double]): Array[Double] = {
+    val out = new Array[Double](3)
+
+    //传人数组的前五个字段是时间：Year,Month,Day,Hour,Minute
+    val yr = data(0).toInt
+    val mon = data(1).toInt
+    val day = data(2).toInt
+    val hour = data(3).toInt
+    val min = data(4).toInt
+
+    var avg = 0.0
+    var std = 0.0
+
+    val key=getkey(hour,min)
+    val value = model.get(key)
+    if(value.nonEmpty){
+      avg=value.get._1
+      std= value.get._2
+    }
+    else{
+      val avgArr = model.values.toArray.map(x=>x._1)
+      val stdArr = model.values.toArray.map(x=>x._2)
+
+      avg=avgArr.sum/avgArr.length
+      std=stdArr.sum/stdArr.length
+
+    }
+
+    out(0)=avg
+    out(1)=avg - 2 * std
+    out(2)=avg + 2 * std
+
+    out
+  }
+
+  private def getkey(hour: Int,min: Int): String={
+    val ins = Calendar.getInstance()
+    ins.set(Calendar.HOUR_OF_DAY,hour)
+
+    var freqMin=min
+    if(winstatsFreq5min.contains(tgt_ind)){
+      freqMin=min/5*5+1
+    }
+    ins.set(Calendar.MINUTE,freqMin)
+    ins.add(Calendar.MINUTE,delta)
+    val df=new SimpleDateFormat("HH:mm")
+
+    df.format(ins.getTime)
+
+    val out = df.format(ins.getTime)
+    out
+  }
+
+  private def getModelMap(): mutable.HashMap[String,(Double,Double)] = {
+    //时间、均值、标准差
+    val avg_std=ContextUtil.sc.textFile(modelPath).map(x=>x.split(",")).map(x=>(x(0),x(1).toDouble,x(2).toDouble)).collect()
+    val avg_std_map=new mutable.HashMap[String,(Double,Double)]
+
+    for(i<-0 until avg_std.length){
+      avg_std_map.put(avg_std(i)._1,(avg_std(i)._2,avg_std(i)._3))
+    }
+
+    avg_std_map
+  }
+
+}
+
+object StatsPredictor{
+  def main(args: Array[String]) {
+    val stats=new StatsPredictor("ECUPIN_AVG_TRANS_TIME_0","ASCECUP01")
+    println(stats.getkey(1,58))
+    println(stats.getkey(23,58))
+  }
+}

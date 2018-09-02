@@ -1,0 +1,222 @@
+package com.wisdom.spark.streaming.gc
+
+import java.text.SimpleDateFormat
+
+import com.wisdom.spark.common.util.{ItoaPropertyUtil, SparkContextUtil}
+import com.wisdom.spark.ml.model.gc.GCModeling
+import com.wisdom.spark.streaming.service.AlarmService
+import org.apache.log4j.Logger
+import org.apache.spark.mllib.clustering.GaussianMixtureModel
+import org.apache.spark.mllib.linalg.{Vector, Vectors}
+import org.apache.spark.sql.Row
+import org.apache.spark.sql.hive.HiveContext
+import org.apache.spark.streaming.{Seconds, StreamingContext}
+
+import scala.collection.mutable.ArrayBuffer
+
+/**
+  * Created by wisdom on 2017/3/1.
+  *
+  * GC异常日志识别 Streaming程序，实时消费kafka消息
+  */
+object GcStreaming {
+  @transient
+  //日志实例
+  val logger = Logger.getLogger(this.getClass)
+  //配置文件实例
+  val props = ItoaPropertyUtil.getProperties()
+
+  /**
+    * GC异常日志实时分类
+    *
+    * @param args
+    */
+  def main(args: Array[String]) {
+    //    参数长度判断
+    //    if (args.length != 3) {
+    //      println("spark-submit --class com.wisdom.spark.streaming.gc.GcStreaming --master yarn-client " +
+    //        "itoa.jar /user/hive/warehouse/gc.db/gcmodel/ 5 0.8")
+    //      System.exit(1)
+    //    }
+
+    //模型加载路径，拼接
+    val ml_root_path = props.getProperty("mlRootPath")
+    val ml_path = ml_root_path + "gc_scavenge_0/"
+    //获取SparkContext
+    val sc = SparkContextUtil.getInstance()
+    //声明用于加载模型的Map变量
+    val model_maps = scala.collection.mutable.Map[String, (GaussianMixtureModel, Array[Int], Array[Int])]()
+    logger.warn("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~queryHostName~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+    //查询所有主机的开始时间
+    val queryHostSt = System.currentTimeMillis()
+    //查询所有主机
+    //val host_names = GCModeling.queryGCHostName()
+    val host_names = props.getProperty("gc.streaming.hostname").split(",").toList.toArray
+    //查询所有主机的结束时间
+    val queryHostEnd = System.currentTimeMillis()
+//    正常数据所占比例
+    val normalPercent = props.getProperty("gc.streaming.normalPercent")
+    logger.warn("---------- 查询所有主机耗时 -------------：" + (queryHostEnd - queryHostSt) + "ms")
+    //遍历所有主机加载对应模型，计算对应的异常高斯索引,降维后的列索引
+    for (hostName <- host_names) {
+      try {
+        //加载模型，模型文件路径/user/wsd/ml_test/hostName/gmm
+        val host_gmm = GaussianMixtureModel.load(sc, ml_path.concat(hostName.toString + "/gmm"))
+        //通过读文件，获取用于模型训练的列索引。返回数组
+        val corr_index = sc.textFile(ml_path.concat(hostName.toString + "/mid/corr.csv")).map(_.toInt).collect()
+        //计算异常高斯的索引
+        val abnormalIdx = getMinorityGaussianIndexs(host_gmm, normalPercent.toDouble)
+        // Map( 主机->(gmm,异常高斯的索引,降维后的列索引) )
+        model_maps += (hostName.toString ->(host_gmm, abnormalIdx, corr_index))
+      } catch {
+        case e: Exception => logger.error("##########################无此主机模型##########################" + hostName)
+      }
+    }
+    logger.warn("===model_maps===\n" + model_maps)
+    //获取SparkStreaming的监听时间间隔，通过配置文件指定
+    val sc_seconds = props.get("gc.streaming.interval.second").toString
+    //创建StreamingContext
+    val ssc = new StreamingContext(sc, Seconds(sc_seconds.toLong))
+    //设置checkpoint
+    val checkPoints = props.getProperty("gc.streaming.checkpoint")
+    ssc.checkpoint(checkPoints)
+    //获取SparkStreaming的监听路径，通过配置文件指定
+    val sc_adr = props.get("gc.streaming.textFileStream").toString
+    //通过StreamingContext创建DStream,监听hive文件路径，创建DStream，接收数据
+    val receive_data = ssc.textFileStream(sc_adr)
+    //将接收到的数据使用逗号分隔
+    val gcdata_spl = receive_data.map(row => row.split(","))
+    //实时数据过滤，条件：参与计算的字段非空
+    val gcdata_scavenge = gcdata_spl.filter(row => row(3).equals("scavenge") && !row(1).isEmpty && !row(2).isEmpty &&
+      !row(5).isEmpty && !row(6).isEmpty && !row(7).isEmpty && !row(8).isEmpty && !row(9).isEmpty && !row(10).isEmpty &&
+      !row(11).isEmpty && !row(12).isEmpty && !row(13).isEmpty && !row(14).isEmpty && !row(15).isEmpty && !row(16).isEmpty &&
+      !row(17).isEmpty && !row(18).isEmpty && !row(19).isEmpty && !row(20).isEmpty && !row(21).isEmpty && !row(22).isEmpty &&
+      !row(23).isEmpty && !row(24).isEmpty && !row(25).isEmpty && !row(27).isEmpty && !row(28).isEmpty && !row(29).isEmpty &&
+      !row(30).isEmpty && !row(31).isEmpty && !row(32).isEmpty && !row(33).isEmpty && !row(34).isEmpty && !row(35).isEmpty &&
+      !row(36).isEmpty && !row(37).isEmpty && !row(38).isEmpty && !row(39).isEmpty && !row(40).isEmpty && !row(41).isEmpty &&
+      !row(42).isEmpty && !row(43).isEmpty && !row(45).isEmpty)
+    val gcdata_global = gcdata_spl.filter(row => row(3).equals("global") && !row(1).isEmpty && !row(2).isEmpty &&
+      !row(5).isEmpty && !row(6).isEmpty && !row(7).isEmpty && !row(8).isEmpty && !row(9).isEmpty && !row(10).isEmpty &&
+      !row(11).isEmpty && !row(12).isEmpty && !row(13).isEmpty && !row(14).isEmpty && !row(15).isEmpty && !row(16).isEmpty &&
+      !row(17).isEmpty && !row(18).isEmpty && !row(19).isEmpty && !row(20).isEmpty && !row(21).isEmpty && !row(22).isEmpty &&
+      !row(23).isEmpty && !row(24).isEmpty && !row(25).isEmpty && !row(27).isEmpty && !row(28).isEmpty && !row(29).isEmpty &&
+      !row(30).isEmpty && !row(31).isEmpty && !row(32).isEmpty && !row(33).isEmpty && !row(34).isEmpty && !row(35).isEmpty &&
+      !row(36).isEmpty && !row(37).isEmpty && !row(38).isEmpty && !row(39).isEmpty && !row(40).isEmpty && !row(41).isEmpty &&
+      !row(42).isEmpty && !row(43).isEmpty && !row(45).isEmpty)
+    //数据抽取，保留训练时输入的字段（训练数据，原数据）
+    val scaveng_extr = gcdata_scavenge.map(row => (Array(
+      row(1).toDouble, row(2).toDouble, row(5).toDouble, row(6).toDouble, row(7).toDouble, row(8).toDouble,
+      row(9).toDouble, row(10).toDouble, row(11).toDouble, row(12).toDouble, row(13).toDouble, row(14).toDouble,
+      row(15).toDouble, row(16).toDouble, row(17).toDouble, row(18).toDouble, row(19).toDouble, row(20).toDouble,
+      row(21).toDouble, row(22).toDouble, row(23).toDouble, row(24).toDouble, row(25).toDouble, row(27).toDouble,
+      row(28).toDouble, row(29).toDouble, row(30).toDouble, row(31).toDouble, row(32).toDouble, row(33).toDouble,
+      row(34).toDouble, row(35).toDouble, row(36).toDouble, row(37).toDouble, row(38).toDouble, row(39).toDouble,
+      row(40).toDouble, row(41).toDouble, row(42).toDouble, row(43).toDouble, row(45).toDouble), row))
+
+    //  根据训练时得到的降维后的列索引，对实时数据降维
+    val scaveng_dr = scaveng_extr.map(row => (Vectors.dense(model_maps.get(row._2(46)).get._3.map { index => row._1(index) }), row._2))
+    //  时间转换格式
+    val format = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS")
+    //  实时数据输入模型预测
+    val scaveng_res = scaveng_dr.map(row => {
+      //获取数据中的exclusiveStart_timestamp
+      val alarmTime = row._2(0)
+      //获取数据中的gcStart_timestamp
+      val gcStart_timestamp = row._2(4)
+      //获取数据中的gcEnd_timestamp
+      val gcEnd_timestamp = row._2(26)
+      //获取数据中的exclusiveEnd_timestamp
+      val exclusiveEnd_timestamp = row._2(44)
+      //JSON拼接，用于确定唯一一条日志
+      val unique_gcInfo = "{exclusiveStart_timestamp:" + alarmTime + ",gcStart_timestamp:" + gcStart_timestamp + ",gcEnd_timestamp:" +
+        gcEnd_timestamp + ",exclusiveEnd_timestamp:" + exclusiveEnd_timestamp + "}"
+      //将exclusiveStart_timestamp转化为时间戳，作为alarmTime字段封装到预测结果中
+      val alarmTimeUT = (format.parse(alarmTime).getTime / 1000).toString
+      //按照数据所属的高斯分布对数据进行分类
+      val predict_res = clusterWithGMM(row._1, model_maps.get(row._2(46)).get._1, model_maps.get(row._2(46)).get._2)
+      //封装预测结果
+      GcCLRes(alarmTimeUT, row._2(46), "scavenge", predict_res, row._2(25), row._2(7), row._2(29),unique_gcInfo)
+    }).foreachRDD(rdd => {
+      //将预测结果转化为list
+      val list = rdd.collect().toList
+      //将预测结果保存到MySQL数据库中
+      new AlarmService().checkGClogIfAlarm(list)
+    })
+    //gc_type="globle"的直接告警
+    val global_res = gcdata_global.map(row => {
+      //获取数据中的exclusiveStart_timestamp
+      val alarmTime = row(0)
+      //获取数据中的gcStart_timestamp
+      val gcStart_timestamp = row(4)
+      //获取数据中的gcEnd_timestamp
+      val gcEnd_timestamp = row(26)
+      //获取数据中的exclusiveEnd_timestamp
+      val exclusiveEnd_timestamp = row(44)
+      //JSON拼接，用于确定唯一一条日志
+      val unique_gcInfo = "{exclusiveStart_timestamp:" + alarmTime + ",gcStart_timestamp:" + gcStart_timestamp + ",gcEnd_timestamp:" +
+        gcEnd_timestamp + ",exclusiveEnd_timestamp:" + exclusiveEnd_timestamp + "}"
+      //将exclusiveStart_timestamp转化为时间戳，作为alarmTime字段封装到预测结果中
+      val alarmTimeUT = (format.parse(alarmTime).getTime / 1000).toString
+      //封装预测结果
+      GcCLRes(alarmTimeUT, row(46), "global", true, row(25), row(7), row(29),unique_gcInfo)
+    }).foreachRDD(rdd => {
+      //将预测结果转化为list
+      val list = rdd.collect().toList
+      //gc_type="globle"的直接告警
+      new AlarmService().checkGClogIfAlarm(list)
+    })
+
+    //    启动流计算环境StreamingContext并等待它“完成”
+    ssc.start()
+    ssc.awaitTermination()
+  }
+
+
+  /**
+    * 获得异常的高斯的索引
+    *
+    * @param gmm  :训练得到的高斯混合模型
+    * @param rate :正常数据所占比例
+    * @return :异常高斯的索引
+    */
+  def getMinorityGaussianIndexs(gmm: GaussianMixtureModel, rate: Double): Array[Int] = {
+    //将所有的高斯模型按照权重进行排序，从大到小
+    var weightsMap = Array.range(0, gmm.k - 1).zip(gmm.weights)
+    weightsMap = weightsMap.sortWith { (s, t) => s._2.compareTo(t._2) > 0 }
+    logger.warn("===========================weights after order===========================")
+    //用于保存异常高斯索引的数组
+    val MinorityGaussianIndexs = new ArrayBuffer[Int]()
+    //用于保存累加权重（概率）的变量
+    var probability = 0.0
+    //遍历排好序的高斯模型权重，并进行累加，当超过给定阀值rate时，保存高斯索引到数组中
+    for (weightMap <- weightsMap) {
+      logger.warn(weightMap + "\n")
+      probability += weightMap._2
+      if (probability > rate) {
+        MinorityGaussianIndexs.append(weightMap._1)
+      }
+    }
+    //返回异常高斯的索引
+    MinorityGaussianIndexs.toArray
+  }
+
+  /**
+    * 按照数据所属的高斯分布对数据进行分类
+    *
+    * @param data                   :需要分类的数据
+    * @param gmm                    :训练得到的GMM模型
+    * @param minorityGaussianIndexs :异常高斯的索引
+    * @return :true为异常数据，false为正常数据
+    */
+  def clusterWithGMM(data: Vector, gmm: GaussianMixtureModel, minorityGaussianIndexs: Array[Int]): Boolean = {
+    //判断需要分类的数据属于哪一高斯模型
+    val predictResult = gmm.predict(data)
+    //如果属于异常高斯模型则返回true,否则false
+    if (minorityGaussianIndexs.contains(predictResult)) {
+      true //异常数据
+    } else {
+      false //正常数据
+    }
+  }
+}
+

@@ -1,0 +1,730 @@
+package com.wisdom.spark.streaming.dao
+
+import java.sql.{Connection, PreparedStatement, ResultSet, Statement}
+import java.text.SimpleDateFormat
+import java.util
+import java.util.{Calendar, Date}
+
+import com.wisdom.spark.common.bean.PredResult
+import com.wisdom.spark.common.log.WSDLog
+import com.wisdom.spark.common.util.{ConnPoolUtil2, ItoaPropertyUtil}
+import com.wisdom.spark.etl.DataProcessing.RealTimeDataProcessingNew
+import com.wisdom.spark.ml.mlUtil.ContextUtil
+import com.wisdom.spark.streaming.thread.Thread4ITMDataCollect2
+import com.wisdom.spark.streaming.tools.{ConnUtils, DataCache, ParamUtil}
+import org.apache.log4j.Logger
+
+import scala.collection.mutable.ArrayBuffer
+
+/**
+  *
+  * Created by zhengz on 2016/12/30.
+  * 预测结果dao操作，数据保存和查询
+  **/
+class PredResultDao extends Serializable {
+  val logger = Logger.getLogger(this.getClass)
+  val props = ItoaPropertyUtil.getProperties()
+  var pst: PreparedStatement = null
+  var pst2: PreparedStatement = null
+  var rs: ResultSet = null
+  var st: Statement = null
+
+
+  /**
+    * 批量保存预测结果到数据库MySQL，并告警
+    *
+    * @param resList 预测结果集合
+    */
+  def saveBatchResult(resList: List[PredResult]) = {
+    var pstInsert: PreparedStatement = null
+    //仅当传入的预测结果集合不为空时，执行保存动作
+    if (resList != null && resList.size != 0) {
+      //批量执行SQL的条数
+      logger.warn("**** 当前预测结果需保存数量合计 ===> " + resList.size)
+      //SQL：向MySQL中的t_pred_result中插入预测结果
+      val sqlInsert = "INSERT INTO t_pred_result(sysName,hostName,predIndexName,currentTime,indexTyp,predPeriod,dataAcceptTime,currentDataTime,currentActualValue,nextPredValue,nextPredMinValue,nextPredMaxValue) " +
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)"
+      var conn: Connection = null
+      try {
+        conn = ConnPoolUtil2.getConn()
+        pstInsert = conn.prepareStatement(sqlInsert)
+        for (i <- 0 until resList.size) {
+          pstInsert.setString(1, resList(i).getSysName) //系统名称中文名
+          pstInsert.setString(2, resList(i).getHostName) //主机名
+          pstInsert.setString(3, resList(i).getPredIndexName) //预测指标名称
+          pstInsert.setString(4, (System.currentTimeMillis() / 1000).toString) //数据保存时间
+          pstInsert.setString(5, resList(i).getIndexTyp) //指标类型：00->单指标,01->复合指标
+          pstInsert.setString(6, resList(i).getPredPeriod) //预测周期（分钟）00->5分钟,01->15分钟,02->30分钟,03->60分钟
+          pstInsert.setString(7, resList(i).getDataAcceptTime) //数据接收时间，即从kafka中消费到消息的时间
+          pstInsert.setString(8, resList(i).getCurrentDataTime) //所预测数据的时刻
+          pstInsert.setString(9, resList(i).getCurrentActualValue) //实测值(由于为预测时刻，实际值未到，暂设空)
+          pstInsert.setString(10, resList(i).getNextPredValue) //下一时刻预测值
+          pstInsert.setString(11, resList(i).getNextPredMinValue) //下一时刻预测下限
+          pstInsert.setString(12, resList(i).getNextPredMaxValue) //下一时刻预测上限
+          pstInsert.addBatch()
+        }
+        pstInsert.executeBatch()
+      } catch {
+        case e: Exception => logger.error("SQL Exception!!!数据库操作异常!!:addBatchPredResult()" + e.getMessage + e.printStackTrace())
+      } finally {
+        if (conn != null) {
+          //释放数据库连接
+          ConnPoolUtil2.releaseCon(conn)
+        }
+        ConnUtils.closeStatement(pstInsert,null , null)
+      }
+    }
+  }
+
+
+
+
+
+
+  /**
+    * 保存预测结果到数据库（不再使用）
+    *
+    * @param res  预测结果
+    * @param conn 数据库连接
+    * @return 返回当前insert的主键
+    */
+  def addPredResult(res: PredResult, conn: Connection): Integer = {
+    var newId = -1
+    if (res != null && conn != null && (!conn.isClosed)) {
+      val sql1 = "INSERT INTO t_pred_result(sysName,hostName,predIndexName,currentTime,indexTyp,predPeriod,dataAcceptTime,currentDataTime,currentActualValue,nextPredValue,nextPredMinValue,nextPredMaxValue) " +
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)"
+      val sql2 = "SELECT LAST_INSERT_ID()"
+      try {
+        pst = conn.prepareStatement(sql1)
+        pst.setString(1, res.getSysName)
+        pst.setString(2, res.getHostName)
+        pst.setString(3, res.getPredIndexName)
+        pst.setString(4, new Date().getTime.toString)
+        pst.setString(5, res.getIndexTyp)
+        pst.setString(6, res.getPredPeriod)
+        pst.setString(7, res.getDataAcceptTime)
+        pst.setString(8, res.getCurrentDataTime)
+        pst.setString(9, res.getCurrentActualValue)
+        pst.setString(10, res.getNextPredValue)
+        pst.setString(11, res.getNextPredMinValue)
+        pst.setString(12, res.getNextPredMaxValue)
+        pst.executeUpdate()
+        st = conn.createStatement()
+        rs = st.executeQuery(sql2)
+        if (rs != null && rs.next()) {
+          newId = rs.getInt(1)
+        }
+        conn.commit()
+      } catch {
+        case e: Exception => logger.error("SQL Exception!!!数据库操作异常!!" + e.printStackTrace())
+      } finally {
+        ConnUtils.closeStatement(st, pst, rs)
+      }
+    }
+    newId
+  }
+
+
+  /**
+    * 保存预测结果到数据库（不再使用）
+    *
+    * @param res  预测结果
+    * @param conn 数据库连接
+    * @return 返回当前insert的主键
+    */
+  def savePredResult(res: PredResult, conn: Connection) = {
+
+    //SQL：向MySQL中的t_pred_result中插入预测结果
+    val sql1 = "INSERT INTO t_pred_result(sysName,hostName,predIndexName,currentTime,indexTyp,predPeriod,dataAcceptTime,currentDataTime,currentActualValue,nextPredValue,nextPredMinValue,nextPredMaxValue) " +
+      "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)"
+    //SQL：更新MySQL中的t_pred_result，找到对应记录插入实际值
+    val sql2 = "UPDATE t_pred_result SET currentActualValue = ?, currentDataTime =? WHERE hostName =? AND predIndexName = ? AND predPeriod = ? AND currentDataTime = ?"
+
+    try {
+      pst = conn.prepareStatement(sql1)
+      pst2 = conn.prepareStatement(sql2)
+      val timeTuple = getPredictTime(res) //获取缓存中记录的前几条预测结果的时间信息
+      pst.setString(1, res.getSysName) //系统名称中文名
+      pst.setString(2, res.getHostName) //主机名
+      pst.setString(3, res.getPredIndexName) //预测指标名称
+      pst.setString(4, (System.currentTimeMillis() / 1000).toString) //数据保存时间
+      pst.setString(5, res.getIndexTyp) //指标类型：00->单指标,01->复合指标
+      pst.setString(6, res.getPredPeriod) //预测周期（分钟）00->5分钟,01->15分钟,02->30分钟,03->60分钟
+      pst.setString(7, res.getDataAcceptTime) //数据接收时间，即从kafka中消费到消息的时间
+      pst.setString(8, timeTuple._2) //所预测数据的时刻
+      pst.setString(9, "") //实测值(由于为预测时刻，实际值未到，暂设空)
+      pst.setString(10, res.getNextPredValue) //下一时刻预测值
+      pst.setString(11, res.getNextPredMinValue) //下一时刻预测下限
+      pst.setString(12, res.getNextPredMaxValue) //下一时刻预测上限
+      pst.executeUpdate()
+      pst2.setString(1, res.getCurrentActualValue) //实测值
+      pst2.setString(2, res.getCurrentDataTime) //数据当中的时间戳（原为计算出的时刻，有偏差需修改）
+      pst2.setString(3, res.getHostName) //主机名
+      pst2.setString(4, res.getPredIndexName) //指标名
+      pst2.setString(5, res.getPredPeriod) //预测周期
+      pst2.setString(6, timeTuple._1) //原计算出的数据时刻
+      pst2.executeUpdate()
+      logger.info("**** 预测结果保存完毕 ....")
+    } catch {
+      case e: Exception => logger.error("SQL Exception!!!数据库操作异常!!:addBatchPredResult()" + e.getMessage + e.printStackTrace())
+    } finally {
+      ConnUtils.closeStatement(pst2, pst, null)
+    }
+
+  }
+
+  /**
+    * 批量保存预测结果到数据库MySQL，并修改上一条预测结果的实测值
+    *
+    * @param resList 预测结果集合
+    * @param conn    数据库连接
+    * @return 返回批次成功个数
+    */
+  def addBatchPredResult(resList: List[PredResult], conn: Connection): Integer = {
+    var nums = 0
+    //仅当传入的预测结果集合不为空时，执行保存动作
+    if (resList != null && resList.size != 0) {
+      //批量执行SQL的条数
+      val batchNums = props.getProperty("mysql.sql.batch").toInt
+      logger.warn("**** 当前预测结果需保存数量合计 ===> " + resList.size)
+      logger.warn("**** 批次限制最大数量 ===> " + batchNums)
+      //SQL：向MySQL中的t_pred_result中插入预测结果
+      val sql1 = "INSERT INTO t_pred_result(sysName,hostName,predIndexName,currentTime,indexTyp,predPeriod,dataAcceptTime,currentDataTime,currentActualValue,nextPredValue,nextPredMinValue,nextPredMaxValue) " +
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)"
+      //SQL：更新MySQL中的t_pred_result，找到对应记录插入实际值
+      val sql2 = "UPDATE t_pred_result SET currentActualValue = ?, currentDataTime =? WHERE hostName =? AND predIndexName = ? AND predPeriod = ? AND currentDataTime = ?"
+
+      try {
+        pst = conn.prepareStatement(sql1)
+        pst2 = conn.prepareStatement(sql2)
+        for (i <- 0 until resList.size) {
+          val timeTuple = getPredictTime(resList(i)) //获取缓存中记录的前几条预测结果的时间信息
+          pst.setString(1, resList(i).getSysName) //系统名称中文名
+          pst.setString(2, resList(i).getHostName) //主机名
+          pst.setString(3, resList(i).getPredIndexName) //预测指标名称
+          pst.setString(4, (System.currentTimeMillis() / 1000).toString) //数据保存时间
+          pst.setString(5, resList(i).getIndexTyp) //指标类型：00->单指标,01->复合指标
+          pst.setString(6, resList(i).getPredPeriod) //预测周期（分钟）00->5分钟,01->15分钟,02->30分钟,03->60分钟
+          pst.setString(7, resList(i).getDataAcceptTime) //数据接收时间，即从kafka中消费到消息的时间
+          pst.setString(8, timeTuple._2) //所预测数据的时刻
+          pst.setString(9, "") //实测值(由于为预测时刻，实际值未到，暂设空)
+          pst.setString(10, resList(i).getNextPredValue) //下一时刻预测值
+          pst.setString(11, resList(i).getNextPredMinValue) //下一时刻预测下限
+          pst.setString(12, resList(i).getNextPredMaxValue) //下一时刻预测上限
+          pst.addBatch() //
+          pst2.setString(1, resList(i).getCurrentActualValue) //实测值
+          pst2.setString(2, resList(i).getCurrentDataTime) //数据当中的时间戳（原为计算出的时刻，有偏差需修改）
+          pst2.setString(3, resList(i).getHostName) //主机名
+          pst2.setString(4, resList(i).getPredIndexName) //指标名
+          pst2.setString(5, resList(i).getPredPeriod) //预测周期
+          pst2.setString(6, timeTuple._1) //原计算出的数据时刻
+          pst2.addBatch()
+          //批量执行
+          if (i % batchNums == 0) {
+            pst.executeBatch()
+            pst2.executeBatch()
+            conn.commit()
+            pst.clearBatch()
+            pst2.clearBatch()
+            logger.info("**** 已保存预测结果数量 ===> " + i)
+          }
+          nums += 1
+        }
+        pst.executeBatch()
+        pst2.executeBatch()
+        conn.commit()
+        logger.info("**** 所有预测结果保存完毕 ....")
+      } catch {
+        case e: Exception => logger.error("SQL Exception!!!数据库操作异常!!:addBatchPredResult()" + e.getMessage + e.printStackTrace())
+      } finally {
+        ConnUtils.closeStatement(pst2, pst, null)
+      }
+    }
+    nums
+  }
+
+  /**
+    * 批量保存预测结果到数据库MySQL，并修改上一条预测结果的实测值
+    *
+    * @param resList 预测结果集合
+    * @param conn    数据库连接
+    * @return 返回批次成功个数
+    */
+  def saveBatchPredResult(resList: List[PredResult], conn: Connection) = {
+    var pst: PreparedStatement = null
+    var pst2: PreparedStatement = null
+    //仅当传入的预测结果集合不为空时，执行保存动作
+    if (resList != null && resList.size != 0) {
+      //批量执行SQL的条数
+      logger.warn("**** 当前预测结果需保存数量合计 ===> " + resList.size)
+      //SQL：向MySQL中的t_pred_result中插入预测结果
+      val sql1 = "INSERT INTO t_pred_result(sysName,hostName,predIndexName,currentTime,indexTyp,predPeriod,dataAcceptTime,currentDataTime,currentActualValue,nextPredValue,nextPredMinValue,nextPredMaxValue) " +
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)"
+      //SQL：更新MySQL中的t_pred_result，找到对应记录插入实际值
+      val sql2 = "UPDATE t_pred_result SET currentActualValue = ?, currentDataTime =? WHERE hostName =? AND predIndexName = ? AND predPeriod = ? AND currentDataTime = ?"
+
+      try {
+        pst = conn.prepareStatement(sql1)
+        pst2 = conn.prepareStatement(sql2)
+        for (i <- 0 until resList.size) {
+          val timeTuple = getPredictTime(resList(i)) //获取缓存中记录的前几条预测结果的时间信息
+          pst.setString(1, resList(i).getSysName) //系统名称中文名
+          pst.setString(2, resList(i).getHostName) //主机名
+          pst.setString(3, resList(i).getPredIndexName) //预测指标名称
+          pst.setString(4, (System.currentTimeMillis() / 1000).toString) //数据保存时间
+          pst.setString(5, resList(i).getIndexTyp) //指标类型：00->单指标,01->复合指标
+          pst.setString(6, resList(i).getPredPeriod) //预测周期（分钟）00->5分钟,01->15分钟,02->30分钟,03->60分钟
+          pst.setString(7, resList(i).getDataAcceptTime) //数据接收时间，即从kafka中消费到消息的时间
+          pst.setString(8, timeTuple._2) //所预测数据的时刻
+          pst.setString(9, "") //实测值(由于为预测时刻，实际值未到，暂设空)
+          pst.setString(10, resList(i).getNextPredValue) //下一时刻预测值
+          pst.setString(11, resList(i).getNextPredMinValue) //下一时刻预测下限
+          pst.setString(12, resList(i).getNextPredMaxValue) //下一时刻预测上限
+          pst.addBatch() //
+          pst2.setString(1, resList(i).getCurrentActualValue) //实测值
+          pst2.setString(2, resList(i).getCurrentDataTime) //数据当中的时间戳（原为计算出的时刻，有偏差需修改）
+          pst2.setString(3, resList(i).getHostName) //主机名
+          pst2.setString(4, resList(i).getPredIndexName) //指标名
+          pst2.setString(5, resList(i).getPredPeriod) //预测周期
+          pst2.setString(6, timeTuple._1) //原计算出的数据时刻
+          pst2.addBatch()
+          //批量执行
+        }
+        pst.executeBatch()
+        pst2.executeBatch()
+        conn.commit()
+        logger.info("**** 所有预测结果保存完毕 ....")
+      } catch {
+        case e: Exception => logger.error("SQL Exception!!!数据库操作异常!!:addBatchPredResult()" + e.getMessage + e.printStackTrace())
+      } finally {
+        ConnUtils.closeStatement(pst2, pst, null)
+      }
+    }
+  }
+
+
+  /**
+    * 批量保存预测结果到数据库MySQL，并修改上一条预测结果的实测值
+    *
+    * @param resList 预测结果集合
+    * @param conn    数据库连接
+    * @return 返回批次成功个数
+    */
+  def saveBatchPredResult2(resList: List[PredResult], conn: Connection) = {
+    var pst: PreparedStatement = null
+    var pst2: PreparedStatement = null
+    var pst3: PreparedStatement = null
+    var resultSet: ResultSet = null
+    //仅当传入的预测结果集合不为空时，执行保存动作
+    if (resList != null && resList.size != 0) {
+      //批量执行SQL的条数
+      logger.warn("**** 当前预测结果需保存数量合计 ===> " + resList.size)
+      //SQL：向MySQL中的t_pred_result中插入预测结果
+      val sql1 = "INSERT INTO t_pred_result(sysName,hostName,predIndexName,currentTime,indexTyp,predPeriod,dataAcceptTime,currentDataTime,currentActualValue,nextPredValue,nextPredMinValue,nextPredMaxValue) " +
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)"
+      //SQL：更新MySQL中的t_pred_result，找到对应记录插入实际值
+      val sql2 = "select * from t_pred_result WHERE hostName =? AND predIndexName = ? AND predPeriod = ? AND currentActualValue = '' ORDER BY predId desc limit 13"
+
+      //TODO
+      val sqlDel = "delete * from t_pred_result WHERE hostName =? AND predIndexName = ? AND currentActualValue = '' ORDER BY predId desc limit 14,-1"
+
+      for (i <- 0 until resList.size) {
+        try {
+          pst = conn.prepareStatement(sql1)
+          pst2 = conn.prepareStatement(sql2)
+          pst3 = conn.prepareStatement(sqlDel)
+          pst.setString(1, resList(i).getSysName) //系统名称中文名
+          pst.setString(2, resList(i).getHostName) //主机名
+          pst.setString(3, resList(i).getPredIndexName) //预测指标名称
+          pst.setString(4, (System.currentTimeMillis() / 1000).toString) //数据保存时间
+          pst.setString(5, resList(i).getIndexTyp) //指标类型：00->单指标,01->复合指标
+          pst.setString(6, resList(i).getPredPeriod) //预测周期（分钟）00->5分钟,01->15分钟,02->30分钟,03->60分钟
+          pst.setString(7, resList(i).getDataAcceptTime) //数据接收时间，即从kafka中消费到消息的时间
+          pst.setString(8, resList(i).getCurrentDataTime) //所预测数据的时刻
+          pst.setString(9, "") //实测值(由于为预测时刻，实际值未到，暂设空)
+          pst.setString(10, resList(i).getNextPredValue) //下一时刻预测值
+          pst.setString(11, resList(i).getNextPredMinValue) //下一时刻预测下限
+          pst.setString(12, resList(i).getNextPredMaxValue) //下一时刻预测上限
+          pst.execute()
+
+
+          if ("00".equalsIgnoreCase(resList(i).getPredPeriod)) {
+            //每周日凌晨0点到2点，删除currentActualValue为空的数据库记录
+            val date = new Date(System.currentTimeMillis())
+            val cal = Calendar.getInstance()
+            cal.setTime(date)
+            val day = cal.get(Calendar.DAY_OF_WEEK)
+
+            if (day == 1) {
+              val sdf = new SimpleDateFormat("yyyy-MM-dd-HH")
+              val dateStr = sdf.format(date)
+              val dateArr = dateStr.split("-")
+              val delStart = dateArr(0) + dateArr(1) + dateArr(2) + "00"
+              val delEnd = dateArr(0) + dateArr(1) + dateArr(2) + "02"
+              val delDate = dateArr(0) + dateArr(1) + dateArr(2) + dateArr(3)
+              if (delDate.toInt >= delStart.toInt && delDate.toInt < delEnd.toInt) {
+                pst3.setString(1, resList(i).getHostName) //主机名
+                pst3.setString(2, resList(i).getPredIndexName) //预测指标名称
+                pst3.execute()
+              }
+            }
+
+            pst2.setString(1, resList(i).getHostName) //实测值
+            pst2.setString(2, resList(i).getPredIndexName) //数据当中的时间戳（原为计算出的时刻，有偏差需修改）
+            pst2.setString(3, resList(i).getPredPeriod) //主机名
+            resultSet = pst2.executeQuery()
+            if (resultSet != null) {
+              var j = 0
+              var predPeriod = "00"
+              while (resultSet.next()) {
+
+                if (j == 1 || j == 3 || j == 6 || j == 12) {
+                  if (j == 1) {
+                    predPeriod = "00"
+                  } else if (j == 3) {
+                    predPeriod = "01"
+                  } else if (j == 6) {
+                    predPeriod = "02"
+                  } else if (j == 12) {
+                    predPeriod = "03"
+                  }
+
+                  pst.setString(1, resList(i).getSysName) //系统名称中文名
+                  pst.setString(2, resList(i).getHostName) //主机名
+                  pst.setString(3, resList(i).getPredIndexName) //预测指标名称
+                  pst.setString(4, (System.currentTimeMillis() / 1000).toString) //数据保存时间
+                  pst.setString(5, resList(i).getIndexTyp) //指标类型：00->单指标,01->复合指标
+                  pst.setString(6, predPeriod) //预测周期（分钟）00->5分钟,01->15分钟,02->30分钟,03->60分钟
+                  pst.setString(7, resultSet.getString(8)) //数据接收时间，即从kafka中消费到消息的时间
+                  pst.setString(8, resultSet.getString(9)) //所预测数据的时刻
+                  pst.setString(9, resList(i).getCurrentActualValue) //实测值(由于为预测时刻，实际值未到，暂设空)
+                  pst.setString(10, resultSet.getString(11)) //下一时刻预测值
+                  pst.setString(11, resultSet.getString(12)) //下一时刻预测下限
+                  pst.setString(12, resultSet.getString(13)) //下一时刻预测上限
+                  pst.execute()
+                }
+                j = j + 1
+
+              }
+            }
+          }
+          logger.info("**** 插入和更新预测结果完毕 ....")
+        } catch {
+          case e: Exception => logger.error("SQL Exception!!!数据库操作异常!!:addBatchPredResult()" + e.getMessage + e.printStackTrace())
+        } finally {
+          ConnUtils.closeStatement(pst2, pst, resultSet)
+          ConnUtils.closeStatement(pst3, null, null)
+        }
+
+      }
+    }
+  }
+
+
+  /**
+    * 批量保存预测结果到数据库MySQL，并修改上一条预测结果的实测值
+    *
+    * @param resList 预测结果集合
+    * @param conn    数据库连接
+    * @return 返回批次成功个数
+    */
+  def saveBatchPredResult3(resList: List[PredResult], conn: Connection) = {
+    var pst: PreparedStatement = null
+    var pst2: PreparedStatement = null
+    var pst3: PreparedStatement = null
+    var pst4: PreparedStatement = null
+    var resultSet: ResultSet = null
+    val gapMap = new util.HashMap[String, Int]
+    gapMap.put("00", 1)
+    gapMap.put("01", 3)
+    gapMap.put("02", 6)
+    gapMap.put("03", 12)
+    //仅当传入的预测结果集合不为空时，执行保存动作
+    if (resList != null && resList.size != 0) {
+      //批量执行SQL的条数
+      logger.warn("**** 当前预测结果需保存数量合计 ===> " + resList.size)
+      //SQL：向MySQL中的t_pred_result中插入预测结果
+      val sql1 = "INSERT INTO t_pred_result(sysName,hostName,predIndexName,currentTime,indexTyp,predPeriod,dataAcceptTime,currentDataTime,currentActualValue,nextPredValue,nextPredMinValue,nextPredMaxValue) " +
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)"
+      //SQL：更新MySQL中的t_pred_result，找到对应记录插入实际值
+      val sql2 = "select * from t_pred_result WHERE hostName =? AND predIndexName = ? AND predPeriod = ? AND currentActualValue = '' ORDER BY predId desc limit ?,1"
+
+      //TODO
+      val sqlDel = "delete from t_pred_result WHERE hostName =? AND predIndexName = ? AND predPeriod = ? AND currentActualValue = '' ORDER BY predId limit 1"
+
+      val sqlDelAll="delete from t_pred_result WHERE currentActualValue = '' limit 1000"
+      for (i <- 0 until resList.size) {
+        try {
+          pst = conn.prepareStatement(sql1)
+          pst2 = conn.prepareStatement(sql2)
+          pst3 = conn.prepareStatement(sqlDel)
+          pst4 = conn.prepareStatement(sqlDelAll)
+
+
+          val date = new Date(System.currentTimeMillis())
+
+          if (i == 1) {
+            val sdf = new SimpleDateFormat("yyyy-MM-dd-HH")
+            val dateStr = sdf.format(date)
+            val dateArr = dateStr.split("-")
+            val delStart = dateArr(0) + dateArr(1) + dateArr(2) + "00"
+            val delEnd = dateArr(0) + dateArr(1) + dateArr(2) + "01"
+            val delDate = dateArr(0) + dateArr(1) + dateArr(2) + dateArr(3)
+            if (delDate.toInt >= delStart.toInt && delDate.toInt < delEnd.toInt) {
+              pst4.execute()
+            }
+          }
+
+          pst.setString(1, resList(i).getSysName) //系统名称中文名
+          pst.setString(2, resList(i).getHostName) //主机名
+          pst.setString(3, resList(i).getPredIndexName) //预测指标名称
+          pst.setString(4, (System.currentTimeMillis() / 1000).toString) //数据保存时间
+          pst.setString(5, resList(i).getIndexTyp) //指标类型：00->单指标,01->复合指标
+          pst.setString(6, resList(i).getPredPeriod) //预测周期（分钟）00->5分钟,01->15分钟,02->30分钟,03->60分钟
+          pst.setString(7, resList(i).getDataAcceptTime) //数据接收时间，即从kafka中消费到消息的时间
+          pst.setString(8, resList(i).getCurrentDataTime) //所预测数据的时刻
+          pst.setString(9, "") //实测值(由于为预测时刻，实际值未到，暂设空)
+          pst.setString(10, resList(i).getNextPredValue) //下一时刻预测值
+          pst.setString(11, resList(i).getNextPredMinValue) //下一时刻预测下限
+          pst.setString(12, resList(i).getNextPredMaxValue) //下一时刻预测上限
+          val succ= pst.execute()
+
+          pst.clearParameters()
+//          pst.close()
+//          pst = conn.prepareStatement(sql1)
+
+
+          if(i==1){
+            logger.warn("******succ?"+succ)
+            logger.warn("******getCurrentDataTime?"+resList(i).getCurrentDataTime)
+          }
+
+          val predPeriod = resList(i).getPredPeriod
+          pst2.setString(1, resList(i).getHostName) //实测值
+          pst2.setString(2, resList(i).getPredIndexName) //数据当中的时间戳（原为计算出的时刻，有偏差需修改）
+          pst2.setString(3, predPeriod) //主机名
+          pst2.setInt(4, gapMap.get(predPeriod))
+          resultSet = pst2.executeQuery()
+          var count=0
+          if (resultSet != null) {
+            while (resultSet.next()) {
+              pst.setString(1, resList(i).getSysName) //系统名称中文名
+              pst.setString(2, resList(i).getHostName) //主机名
+              pst.setString(3, resList(i).getPredIndexName) //预测指标名称
+              pst.setString(4, (System.currentTimeMillis() / 1000).toString) //数据保存时间
+              pst.setString(5, resList(i).getIndexTyp) //指标类型：00->单指标,01->复合指标
+              pst.setString(6, resList(i).getPredPeriod) //预测周期（分钟）00->5分钟,01->15分钟,02->30分钟,03->60分钟
+              pst.setString(7, resultSet.getString(8)) //数据接收时间，即从kafka中消费到消息的时间
+              pst.setString(8, resultSet.getString(9)) //所预测数据的时刻
+              pst.setString(9, resList(i).getCurrentActualValue) //实测值(由于为预测时刻，实际值未到，暂设空)
+              pst.setString(10, resultSet.getString(11)) //下一时刻预测值
+              pst.setString(11, resultSet.getString(12)) //下一时刻预测下限
+              pst.setString(12, resultSet.getString(13)) //下一时刻预测上限
+              val succ2=pst.execute()
+
+              count=1
+              if(i==1){
+                logger.warn("******succ2?"+succ2)
+              }
+            }
+          }
+
+          if(count==1){
+            pst3.setString(1, resList(i).getHostName) //实测值
+            pst3.setString(2, resList(i).getPredIndexName) //数据当中的时间戳（原为计算出的时刻，有偏差需修改）
+            pst3.setString(3, resList(i).getPredPeriod) //主机名
+            pst3.execute()
+          }
+
+
+//          conn.commit()
+          logger.info("**** 插入和更新预测结果完毕 ....")
+        } catch {
+          case e: Exception => logger.error("SQL Exception!!!数据库操作异常!!:addBatchPredResult()" + e.getMessage + e.printStackTrace())
+        } finally {
+          ConnUtils.closeStatement(pst2, pst, resultSet)
+          ConnUtils.closeStatement(pst3, pst4, null)
+        }
+
+      }
+    }
+  }
+
+  /**
+    * 批量保存预测结果到数据库MySQL，并修改上一条预测结果的实测值
+    *
+    * @param resList 预测结果集合
+    * @param conn    数据库连接
+    * @return 返回批次成功个数
+    */
+  def addBatchPredResultMT(resList: List[PredResult]): Unit = {
+    //仅当传入的预测结果集合不为空时，执行保存动作
+    if (resList != null && resList.size != 0) {
+      //批量执行SQL的条数
+      val batchNums = props.getProperty("mysql.sql.batch").toInt
+      val connNums = resList.size / batchNums + 1
+      logger.warn("**** 当前预测结果需保存数量合计 ===> " + resList.size)
+      logger.warn("**** 批次限制最大数量 ===> " + batchNums)
+      logger.warn("**** 需要的数据库连接对象数量 ===> " + connNums)
+      //SQL：向MySQL中的t_pred_result中插入预测结果
+      val sql1 = "INSERT INTO t_pred_result(sysName,hostName,predIndexName,currentTime,indexTyp,predPeriod,dataAcceptTime,currentDataTime,currentActualValue,nextPredValue,nextPredMinValue,nextPredMaxValue) " +
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)"
+      //SQL：更新MySQL中的t_pred_result，找到对应记录插入实际值
+      val sql2 = "UPDATE t_pred_result SET currentActualValue = ?, currentDataTime =? WHERE hostName =? AND predIndexName = ? AND predPeriod = ? AND currentDataTime = ?"
+
+      for (i <- 0 until connNums) {
+        val conn = ConnPoolUtil2.getConn()
+        val pst = conn.prepareStatement(sql1)
+        val pst2 = conn.prepareStatement(sql2)
+        try {
+          var saveListSize = batchNums
+          if (i <= connNums - 1) {
+            saveListSize = resList.size % batchNums
+          }
+          for (j <- 0 until saveListSize) {
+            val row = i * batchNums + j
+            val timeTuple = getPredictTime(resList(row)) //获取缓存中记录的前几条预测结果的时间信息
+            pst.setString(1, resList(row).getSysName) //系统名称中文名
+            pst.setString(2, resList(row).getHostName) //主机名
+            pst.setString(3, resList(row).getPredIndexName) //预测指标名称
+            pst.setString(4, (System.currentTimeMillis() / 1000).toString) //数据保存时间
+            pst.setString(5, resList(row).getIndexTyp) //指标类型：00->单指标,01->复合指标
+            pst.setString(6, resList(row).getPredPeriod) //预测周期（分钟）00->5分钟,01->15分钟,02->30分钟,03->60分钟
+            pst.setString(7, resList(row).getDataAcceptTime) //数据接收时间，即从kafka中消费到消息的时间
+            pst.setString(8, timeTuple._2) //所预测数据的时刻
+            pst.setString(9, "") //实测值(由于为预测时刻，实际值未到，暂设空)
+            pst.setString(10, resList(row).getNextPredValue) //下一时刻预测值
+            pst.setString(11, resList(row).getNextPredMinValue) //下一时刻预测下限
+            pst.setString(12, resList(row).getNextPredMaxValue) //下一时刻预测上限
+            pst.addBatch() //
+            pst2.setString(1, resList(row).getCurrentActualValue) //实测值
+            pst2.setString(2, resList(row).getCurrentDataTime) //数据当中的时间戳（原为计算出的时刻，有偏差需修改）
+            pst2.setString(3, resList(row).getHostName) //主机名
+            pst2.setString(4, resList(row).getPredIndexName) //指标名
+            pst2.setString(5, resList(row).getPredPeriod) //预测周期
+            pst2.setString(6, timeTuple._1) //原计算出的数据时刻
+            pst2.addBatch()
+          }
+          val run = new Runnable {
+            override def run(): Unit = {
+              try {
+                pst.executeBatch()
+                pst2.executeBatch()
+                conn.commit()
+              } catch {
+                case e: Exception => logger.error("SQL Exception!!!数据库操作异常!!:addBatchPredResult()" + e.getMessage + e.printStackTrace())
+              } finally {
+                ConnUtils.closeStatement(pst2, pst, null)
+                ConnPoolUtil2.releaseCon(conn)
+              }
+
+              logger.info("**** mysql.sql.batch条预测结果保存完毕 ....")
+            }
+          }
+          new Thread(run).start()
+
+        } catch {
+          case e: Exception => logger.error("SQL Exception!!!数据库操作异常!!:addBatchPredResult()" + e.getMessage + e.printStackTrace())
+        } finally {
+          ConnUtils.closeStatement(pst2, pst, null)
+          ConnPoolUtil2.releaseCon(conn)
+        }
+
+      }
+    }
+  }
+
+  /**
+    * 计算并获取该条预测结果的预测时间点 返回一个二元组 (当前值实测时间点,预测时间点)
+    * 返回实测时间点为了修改该时间点的实测值
+    *
+    * @param res
+    * @return
+    */
+  private def getPredictTime(res: PredResult): (String, String) = {
+    //连接符：？
+    val regex: Char = 0x0f
+    //模拟缓存Map（主机名？指标名？预测周期->ab缓存数组）
+    val times = DataCache.predictTimes
+    //当前时刻
+    var lastTime = ""
+    //下一时刻
+    var nextTime = ""
+    //缓存数组，用以存储计算出的下一时刻值
+    var ab: ArrayBuffer[String] = null
+    if (res != null) {
+      //键值拼接：主机名？指标名？预测周期
+      val key = res.getHostName + regex + res.getPredIndexName + regex + res.getPredPeriod
+      //模拟缓存Map中存在当前key值
+      if (times.containsKey(key)) {
+        ab = times.get(key)
+      } else {
+        //模拟缓存中不存在当前键值，新建数组
+        ab = new ArrayBuffer[String]()
+      }
+      //获取预测数据中的时间戳
+      val timeLong = res.getCurrentDataTime.toLong
+      //获取预测周期
+      val period = res.getPredPeriod
+
+      /** 针对不同时间间隔，选择性保留历史预测数据时间，当实测值到了修改进去 */
+      //预测周期为五分钟时
+      if ("00".equals(period)) {
+        //计算五分钟后的时间
+        nextTime = (timeLong + 5 * 60).toString
+        //[0]
+        if (ab.size == 1) {
+          //提取ab缓存数组中的第一个值作为当前时刻lastTime
+          lastTime = ab(0)
+          //移除ab数组中的首位
+          ab.remove(0)
+        }
+        //将计算出的五分钟后的时间值保存到ab数组中的末尾
+        ab += nextTime
+      }
+      //当预测周期为十五分钟的时候
+      else if ("01".equals(period)) {
+        //计算十五分钟后的时间
+        nextTime = (timeLong + 15 * 60).toString
+        //[0,5,10]
+        if (ab.size == 3) {
+          //提取ab缓存数组中的第一个值作为当前时刻lastTime
+          lastTime = ab(0)
+          //移除ab数组中的首位
+          ab.remove(0)
+        }
+        //将计算出的十五分钟后的时间值保存到ab数组中的末尾
+        ab += nextTime
+      } else if ("02".equals(period)) {
+        //计算半小时后的时间
+        nextTime = (timeLong + 30 * 60).toString
+        //[0,5,10,15,20,25]
+        if (ab.size == 6) {
+          //提取ab缓存数组中的第一个值作为当前时刻lastTime
+          lastTime = ab(0)
+          //移除ab数组中的首位
+          ab.remove(0)
+        }
+        //将计算出的半小时后的时间值保存到ab数组中的末尾
+        ab += nextTime
+      } else if ("03".equals(period)) {
+        //计算一小时后的时间
+        nextTime = (timeLong + 60 * 60).toString
+        //[0,5,10,15,20,25,30,35,40,45,50,55]
+        if (ab.size == 12) {
+          //提取ab缓存数组中的第一个值作为当前时刻lastTime
+          lastTime = ab(0)
+          //移除ab数组中的首位
+          ab.remove(0)
+        }
+        //将计算出的一小时后的时间值保存到ab数组中的末尾
+        ab += nextTime
+      }
+      //将Ab数组以键值对形式保存到模拟缓存中
+      DataCache.predictTimes.put(key, ab)
+    }
+    //    println("----------------------------->>>>> " + DataCache.predictTimes)
+    //返回（当前时间，下一时刻）
+    (lastTime, nextTime)
+  }
+}
